@@ -10,6 +10,7 @@ import { startBackupScheduler, stopBackupScheduler } from './services/backupSche
 import { registerRoutes } from './routes';
 import { fatalErrorRecoveryManager } from './utils/fatalErrorRecovery';
 import { installationCoverageService } from './services/InstallationCoverageService';
+import { secretVerificationQueueService } from './services/SecretVerificationQueueService';
 
 // 1. Top-level Error Handling (Fail Fast & log)
 process.on('unhandledRejection', (reason) => {
@@ -102,6 +103,7 @@ async function bootstrap() {
       logger.warn('GitHub scanning is disabled until credentials are configured');
     }
     installationCoverageService.start();
+    secretVerificationQueueService.start();
     await startBackupScheduler();
   } catch (serviceError) {
     throw new Error(`Failed to start services: ${serviceError instanceof Error ? serviceError.message : String(serviceError)}`);

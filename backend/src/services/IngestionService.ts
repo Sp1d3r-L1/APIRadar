@@ -1,8 +1,10 @@
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { Leak, ILeak } from '../models/Leak';
 import { Secret } from '../models/Secret';
 import { getEncryptionKey, encrypt } from '../utils/encryption';
 import { logger } from '../utils/logger';
+import { secretVerificationQueueService } from './SecretVerificationQueueService';
 
 export interface RawLeakFinding extends Partial<ILeak> {
   fullKey?: string;
@@ -53,6 +55,8 @@ export class IngestionService {
           },
           { upsert: true }
         );
+
+        await secretVerificationQueueService.enqueueSecret(new mongoose.Types.ObjectId(String(secretDoc._id)), leak.provider || 'unknown');
 
       } catch (error) {
         if ((error as any).code === 11000) {

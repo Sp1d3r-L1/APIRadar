@@ -13,7 +13,7 @@ interface InstallationToken {
 export class GitHubAppAuthService {
   private appId: string;
   private privateKey: string | null = null;
-  private cachedInstallationToken: InstallationToken | null = null;
+  private cachedInstallationTokens = new Map<number, InstallationToken>();
   private installationId: number | null = null;
 
   constructor() {
@@ -67,6 +67,12 @@ export class GitHubAppAuthService {
   private async fetchInstallationId(appJwt: string): Promise<number> {
     if (this.installationId !== null) return this.installationId;
 
+    const configuredId = Number(process.env['GITHUB_APP_INSTALLATION_ID']);
+    if (Number.isSafeInteger(configuredId) && configuredId > 0) {
+      this.installationId = configuredId;
+      return configuredId;
+    }
+
     const res = await axios.get('https://api.github.com/app/installations', {
       headers: {
         Authorization: `Bearer ${appJwt}`,
@@ -84,17 +90,26 @@ export class GitHubAppAuthService {
     return foundId;
   }
 
-  async getValidToken(): Promise<string> {
+  async getPrimaryInstallationId(): Promise<number> {
+    return this.fetchInstallationId(this.generateAppJwt());
+  }
+
+  async getCoverageInstallationIds(): Promise<number[]> {
+    const primary = await this.getPrimaryInstallationId();
+    const extras = (process.env['GITHUB_COVERAGE_INSTALLATION_IDS'] || '')
+      .split(',').map(value => Number(value.trim()))
+      .filter(value => Number.isSafeInteger(value) && value > 0 && value !== primary);
+    return [primary, ...new Set(extras)];
+  }
+
+  async getValidToken(installationId?: number): Promise<string> {
     const now = Date.now();
-    
-    if (this.cachedInstallationToken && (this.cachedInstallationToken.expiresAt - now > 5 * 60 * 1000)) {
-      return this.cachedInstallationToken.token;
-    }
+    const appJwt = this.generateAppJwt();
+    const installId = installationId || await this.fetchInstallationId(appJwt);
+    const cached = this.cachedInstallationTokens.get(installId);
+    if (cached && cached.expiresAt - now > 5 * 60 * 1000) return cached.token;
 
     try {
-      const appJwt = this.generateAppJwt();
-      const installId = await this.fetchInstallationId(appJwt);
-
       const res = await axios.post(
         `https://api.github.com/app/installations/${installId}/access_tokens`,
         {},
@@ -109,13 +124,13 @@ export class GitHubAppAuthService {
       const token = String(res.data.token);
       const expiresAt = new Date(res.data.expires_at).getTime();
 
-      this.cachedInstallationToken = { token, expiresAt };
-      logger.init(`[GITHUB-APP] Successfully minted GitHub App Installation Access Token (valid for 60m)`);
+      this.cachedInstallationTokens.set(installId, { token, expiresAt });
+      logger.init(`[GITHUB-APP] Minted installation token for ${installId}`);
 
       return token;
     } catch (err: any) {
       logger.warn(`[GITHUB-APP] Failed to mint installation token: ${err.message}`);
-      if (this.cachedInstallationToken) return this.cachedInstallationToken.token;
+      if (cached && cached.expiresAt > now) return cached.token;
       throw err;
     }
   }

@@ -29,8 +29,10 @@ const MAX_BLOB_BYTES = 1024 * 1024;
 const MAX_COMMITS_PER_PASS = 2;
 const INTERVAL_MS = 30 * 1000;
 const CORE_RESERVE = 1500;
+const EXTRA_CORE_RESERVE = 100;
 
 class CoreBudgetExhausted extends Error {}
+type RateBudget = { remaining: number | null; resetAt: number; blockedUntil: number; secondaryStrikes: number };
 
 /** Decode bounded, printable Base64 literals and run the normal rules on their content. */
 export function scanEncodedContent(content: string): Array<{ key: string; provider: string; encoded: boolean }> {
@@ -67,12 +69,47 @@ class InstallationCoverageService {
   private timer?: NodeJS.Timeout;
   private running = false;
   private importPromise: Promise<void> | undefined;
-  private coreRemaining: number | null = null;
-  private coreResetAt = 0;
+  private primaryInstallationId = 0;
+  private coverageInstallationIds: number[] = [];
+  private tokenInstallations = new Map<string, number>();
+  private budgets = new Map<number, RateBudget>();
+
+  private registerToken(id: number, token: string): void {
+    for (const [oldToken, oldId] of this.tokenInstallations) {
+      if (oldId === id && oldToken !== token) this.tokenInstallations.delete(oldToken);
+    }
+    this.tokenInstallations.set(token, id);
+  }
+
+  private budget(id: number): RateBudget {
+    let budget = this.budgets.get(id);
+    if (!budget) {
+      budget = { remaining: null, resetAt: 0, blockedUntil: 0, secondaryStrikes: 0 };
+      this.budgets.set(id, budget);
+    }
+    if (Date.now() >= budget.resetAt) budget.remaining = null;
+    return budget;
+  }
+
+  private pauseUntil(id: number): number {
+    const budget = this.budget(id);
+    const reserve = id === this.primaryInstallationId ? CORE_RESERVE : EXTRA_CORE_RESERVE;
+    return Math.max(budget.blockedUntil,
+      budget.remaining !== null && budget.remaining <= reserve ? budget.resetAt : 0);
+  }
 
   getRatePauseUntil(): string | null {
-    return this.coreRemaining !== null && this.coreRemaining <= CORE_RESERVE && Date.now() < this.coreResetAt
-      ? new Date(this.coreResetAt).toISOString() : null;
+    if (!this.coverageInstallationIds.length) return null;
+    const pauses = this.coverageInstallationIds.map(id => this.pauseUntil(id));
+    return pauses.every(until => until > Date.now())
+      ? new Date(Math.min(...pauses)).toISOString() : null;
+  }
+
+  getInstallationCapacity(): { configured: number; available: number } {
+    return {
+      configured: this.coverageInstallationIds.length,
+      available: this.coverageInstallationIds.filter(id => this.pauseUntil(id) <= Date.now()).length
+    };
   }
 
   start(): void {
@@ -91,8 +128,12 @@ class InstallationCoverageService {
   }
 
   private async get<T>(url: string, token: string, params?: Record<string, unknown>): Promise<T> {
-    if (this.coreRemaining !== null && this.coreRemaining <= CORE_RESERVE && Date.now() < this.coreResetAt) {
-      throw new CoreBudgetExhausted(`Core API reserve reached; resumes after ${new Date(this.coreResetAt).toISOString()}`);
+    const id = this.tokenInstallations.get(token);
+    if (!id) throw new Error('Unregistered coverage installation token');
+    const budget = this.budget(id);
+    const pausedUntil = this.pauseUntil(id);
+    if (pausedUntil > Date.now()) {
+      throw new CoreBudgetExhausted(`GitHub installation ${id} paused until ${new Date(pausedUntil).toISOString()}`);
     }
     try {
       const response = await axios.get<T>(`${API}${url}`, {
@@ -102,18 +143,32 @@ class InstallationCoverageService {
       });
       const remaining = Number(response.headers['x-ratelimit-remaining']);
       const reset = Number(response.headers['x-ratelimit-reset']);
-      if (Number.isFinite(remaining)) this.coreRemaining = remaining;
-      if (Number.isFinite(reset)) this.coreResetAt = reset * 1000;
+      if (Number.isFinite(remaining)) budget.remaining = remaining;
+      if (Number.isFinite(reset)) budget.resetAt = reset * 1000;
+      budget.secondaryStrikes = 0;
       return response.data;
     } catch (error) {
       const response = (error as AxiosError).response;
       const remaining = Number(response?.headers?.['x-ratelimit-remaining']);
       const reset = Number(response?.headers?.['x-ratelimit-reset']);
-      if (response && Number.isFinite(remaining)) this.coreRemaining = remaining;
-      if (response && Number.isFinite(reset)) this.coreResetAt = reset * 1000;
-      if (response?.status === 429 || (response?.status === 403 && remaining === 0)) {
-        this.coreRemaining = 0;
-        this.coreResetAt = Math.max(this.coreResetAt, Date.now() + 60_000);
+      if (response && Number.isFinite(remaining)) budget.remaining = remaining;
+      if (response && Number.isFinite(reset)) budget.resetAt = reset * 1000;
+      const message = String((response?.data as { message?: string } | undefined)?.message || '');
+      const secondary = /secondary rate limit|abuse detection/i.test(message) ||
+        (response?.status === 429 && remaining > 0);
+      if (secondary) {
+        budget.secondaryStrikes++;
+        const retryAfter = Number(response?.headers['retry-after']);
+        const fallbackMs = Math.min(900_000, 60_000 * 2 ** Math.min(budget.secondaryStrikes - 1, 4));
+        const retryUntil = Date.now() + (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : fallbackMs);
+        budget.blockedUntil = remaining === 0 ? Math.max(budget.resetAt, retryUntil) : retryUntil;
+      } else if (response?.status === 429 || (response?.status === 403 && remaining === 0)) {
+        const retryAfter = Number(response.headers['retry-after']);
+        const retryUntil = Date.now() + (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 60_000);
+        budget.blockedUntil = remaining === 0 ? Math.max(budget.resetAt, retryUntil) : retryUntil;
+      }
+      if (response?.status === 403 || response?.status === 429) {
+        logger.warn(`[COVERAGE] GitHub ${response.status} on ${url} for installation ${id}: ${message || 'no message'} (remaining ${response.headers['x-ratelimit-remaining'] || 'unknown'})`);
       }
       throw error;
     }
@@ -250,11 +305,14 @@ class InstallationCoverageService {
     try {
       if (!this.importPromise) this.importPromise = importDiscoveredRepositories();
       await this.importPromise;
-      if (this.coreRemaining !== null && this.coreRemaining <= CORE_RESERVE && Date.now() < this.coreResetAt) return;
-      const token = await gitHubAppAuthService.getValidToken();
+      this.coverageInstallationIds = await gitHubAppAuthService.getCoverageInstallationIds();
+      this.primaryInstallationId = this.coverageInstallationIds[0]!;
+      const primaryToken = await gitHubAppAuthService.getValidToken(this.primaryInstallationId);
+      this.registerToken(this.primaryInstallationId, primaryToken);
       // Refresh the installation set periodically; public repository discovery is continuous.
-      if (!this.installedAt || Date.now() - this.installedAt > 15 * 60_000) {
-        const repos = await this.repositories(token);
+      if (this.pauseUntil(this.primaryInstallationId) <= Date.now() &&
+          (!this.installedAt || Date.now() - this.installedAt > 15 * 60_000)) {
+        const repos = await this.repositories(primaryToken);
         if (repos.length) {
           await RepositoryCoverage.bulkWrite(repos.map(repo => ({ updateOne: {
             filter: { repository: repo.full_name },
@@ -264,11 +322,35 @@ class InstallationCoverageService {
         }
         this.installedAt = Date.now();
       }
-      const next = await RepositoryCoverage.findOne().sort({ lastScannedAt: 1, _id: 1 }).lean();
-      if (!next) return;
-      const repository = next.repository;
-      await this.scanRepository(repository, token, next.installed);
-      await this.scanHistory(repository, token);
+      const active: Array<{ id: number; token: string }> = [];
+      for (const id of this.coverageInstallationIds) {
+        if (this.pauseUntil(id) > Date.now()) continue;
+        try {
+          const token = id === this.primaryInstallationId
+            ? primaryToken : await gitHubAppAuthService.getValidToken(id);
+          this.registerToken(id, token);
+          active.push({ id, token });
+        } catch (error) {
+          logger.warn(`[COVERAGE] Installation ${id} token failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (!active.length) return;
+      const next = await RepositoryCoverage.find().sort({ lastScannedAt: 1, _id: 1 })
+        .limit(active.length).lean();
+      for (const [index, { id, token }] of active.slice(0, next.length).entries()) {
+        const repository = next[index]!;
+        try {
+          const alertToken = this.pauseUntil(this.primaryInstallationId) <= Date.now()
+            ? primaryToken : undefined;
+          await this.scanRepository(repository.repository, token, repository.installed, alertToken);
+          await this.scanHistory(repository.repository, token);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await RepositoryCoverage.updateOne({ repository: repository.repository },
+            { $set: { lastScannedAt: new Date(), error: message } });
+          logger.warn(`[COVERAGE] Installation ${id} pass failed for ${repository.repository}: ${message}`);
+        }
+      }
     } catch (error) {
       logger.warn(`[COVERAGE] Pass failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -297,17 +379,24 @@ class InstallationCoverageService {
       }
       return 'ok';
     } catch (error) {
-      const status = (error as AxiosError).response?.status;
-      if (status === 403) return 'denied';
+      const response = (error as AxiosError).response;
+      const status = response?.status;
+      if (response?.status === 403) {
+        const message = String((response.data as { message?: string } | undefined)?.message || '');
+        return response.headers['x-ratelimit-remaining'] === '0' ||
+          /rate limit|abuse detection/i.test(message) ? 'error' : 'denied';
+      }
       if (status === 404) return 'unavailable';
       logger.warn(`[COVERAGE] Alert sync failed for ${repository}: ${error instanceof Error ? error.message : String(error)}`);
       return 'error';
     }
   }
 
-  private async scanRepository(repository: string, token: string, installed: boolean): Promise<void> {
+  private async scanRepository(repository: string, token: string, installed: boolean, alertToken?: string): Promise<void> {
     const previous = await RepositoryCoverage.findOne({ repository }).lean();
-    const alertsPermission = installed ? await this.syncAlerts(repository, token) : 'not-applicable';
+    const alertsPermission = installed
+      ? (alertToken ? await this.syncAlerts(repository, alertToken) : 'pending')
+      : 'not-applicable';
     let cursorBranch = previous?.cursorBranch || 0;
     let cursorFile = previous?.cursorFile || 0;
     let heads = previous?.snapshotHeads?.length ? previous.snapshotHeads : await this.branches(repository, token);

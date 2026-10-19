@@ -201,13 +201,35 @@ FeedEmptyState.displayName = "FeedEmptyState";
 type VerificationData = {
   enabled: boolean;
   total: number;
-  coverage: Array<{ repository: string; branchesSeen: number; filesSeen: number; skippedBlobs: number; truncatedTrees: number; alertsPermission: string; snapshotCompleteAt?: string; error?: string }>;
+  coverage: Array<{ repository: string; branchesSeen: number; filesSeen: number; skippedBlobs: number; skippedLarge: number; skippedBinary: number; truncatedTrees: number; commitsSeen: number; missingPatches: number; historyCompleteAt?: string; historyError?: string; alertsPermission: string; snapshotCompleteAt?: string; error?: string }>;
   findings: Array<{ repository: string; provider: string; path: string; branch?: string; encoded: boolean; source: string; state: string; validity: string; url: string; observedAt: string }>;
+};
+type VerificationStatus = {
+  enabled: boolean;
+  scope: string;
+  repositories: number;
+  findings: number;
+  validity: Record<string, number>;
+  lastScannedAt: string | null;
+  coverage: null | { branchesSeen: number; commitsSeen: number; snapshotComplete: number; historyComplete: number; missingPatches: number; skippedLarge: number; skippedBinary: number; skippedBlobs: number; alertsDenied: number };
 };
 
 const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => void; isAuthenticated: boolean }) => {
   const [data, setData] = useState<VerificationData | null>(null);
+  const [status, setStatus] = useState<VerificationStatus | null>(null);
   const [message, setMessage] = useState('Loading verification status…');
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/verification/status', { cache: 'no-store' })
+      .then(async response => {
+        if (!response.ok) throw new Error('Verification service unavailable.');
+        return response.json() as Promise<VerificationStatus>;
+      })
+      .then(value => { if (!cancelled) setStatus(value); })
+      .catch(error => { if (!cancelled) setMessage(error.message); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -222,43 +244,57 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
     return () => { cancelled = true; };
   }, [isAuthenticated]);
 
-  if (!isAuthenticated) return (
-    <div className="m-auto text-center space-y-3 p-6">
-      <Lock className="h-6 w-6 mx-auto text-amber-500" />
-      <p className="text-sm">Sign in to view verification for repositories connected to your GitHub App.</p>
-      {onSignIn && <button className="text-amber-500 underline" onClick={onSignIn}>Sign in</button>}
-    </div>
-  );
-  if (!data) return <div className="m-auto text-sm text-muted-foreground p-6">{message}</div>;
   return (
     <div className="overflow-y-auto p-4 sm:p-6 space-y-4 text-xs sm:text-sm">
       <div className="flex flex-wrap gap-3 items-center">
         <strong>Live Verification</strong>
-        <span>{data.enabled ? 'Installation sync enabled' : 'Installation sync disabled'}</span>
-        <span>{data.coverage.length} repositories · {data.total} findings</span>
+        <span>{status ? (status.enabled ? 'Installation sync enabled' : 'Installation sync disabled') : message}</span>
+        {status && <span>{status.repositories} repositories · {status.findings} findings</span>}
       </div>
-      <p className="text-muted-foreground">GitHub reports active, inactive, or unknown for supported alert types. Branch snapshot matches remain unknown. No credential is shown or tested by APIRadar.</p>
-      {data.coverage.map(repo => (
+      {status && <div className="flex flex-wrap gap-3 text-muted-foreground">
+        <span>Active: {status.validity.active || 0}</span>
+        <span>Inactive: {status.validity.inactive || 0}</span>
+        <span>Unknown: {status.validity.unknown || 0}</span>
+        {status.lastScannedAt && <span>Last scan: {new Date(status.lastScannedAt).toLocaleString()}</span>}
+      </div>}
+      {status?.coverage && <div className="flex flex-wrap gap-3 text-muted-foreground">
+        <span>Branch heads: {status.coverage.branchesSeen}</span>
+        <span>Commit visits: {status.coverage.commitsSeen}</span>
+        <span>Snapshot passes: {status.coverage.snapshotComplete}/{status.repositories}</span>
+        <span>History passes: {status.coverage.historyComplete}/{status.repositories}</span>
+        {status.coverage.alertsDenied > 0 && <span className="text-amber-500">GitHub alerts permission missing: {status.coverage.alertsDenied}</span>}
+        {(status.coverage.missingPatches + status.coverage.skippedLarge + status.coverage.skippedBinary + status.coverage.skippedBlobs) > 0 && <span className="text-amber-500">Coverage gaps: {status.coverage.missingPatches + status.coverage.skippedLarge + status.coverage.skippedBinary + status.coverage.skippedBlobs}</span>}
+      </div>}
+      <p className="text-muted-foreground">Scope: GitHub App installed public repositories. Global search remains limited to GitHub's indexed code.</p>
+      <p className="text-muted-foreground">GitHub reports active or inactive only for supported alert types. Branch and commit matches remain unknown. APIRadar does not test discovered credentials.</p>
+      {!isAuthenticated && <div className="flex gap-2 items-center text-muted-foreground"><Lock className="h-4 w-4" /> Location details require operator sign-in. {onSignIn && <button className="text-amber-500 underline" onClick={onSignIn}>Sign in</button>}</div>}
+      {isAuthenticated && !data && <p className="text-muted-foreground">{message}</p>}
+      {data?.coverage.map(repo => (
         <div key={repo.repository} className="border border-border/50 rounded p-2">
-          <strong>{repo.repository}</strong> · {repo.branchesSeen} branches · {repo.filesSeen} files · alerts: {repo.alertsPermission}
-          {repo.truncatedTrees > 0 && <span> · {repo.truncatedTrees} truncated trees</span>}
+          <strong>{repo.repository}</strong> · {repo.branchesSeen} branches · {repo.filesSeen} files · {repo.commitsSeen || 0} commits · alerts: {repo.alertsPermission}
+          {repo.truncatedTrees > 0 && <span> · {repo.truncatedTrees} trees recovered</span>}
           {repo.skippedBlobs > 0 && <span> · {repo.skippedBlobs} skipped blobs</span>}
+          {repo.skippedLarge > 0 && <span> · {repo.skippedLarge} large files skipped</span>}
+          {repo.skippedBinary > 0 && <span> · {repo.skippedBinary} binary files skipped</span>}
+          {repo.missingPatches > 0 && <span> · {repo.missingPatches} commit patches unavailable</span>}
           {repo.snapshotCompleteAt ? <span> · last complete pass {new Date(repo.snapshotCompleteAt).toLocaleString()}</span> : <span> · snapshot in progress</span>}
+          {repo.historyCompleteAt ? <span> · history pass completed {new Date(repo.historyCompleteAt).toLocaleString()}</span> : <span> · history in progress</span>}
           {repo.error && <span className="text-amber-500"> · scan error</span>}
+          {repo.historyError && <span className="text-amber-500"> · history error</span>}
         </div>
       ))}
-      {data.findings.map((finding, index) => (
+      {data?.findings.map((finding, index) => (
         <div key={`${finding.repository}:${index}`} className="border-b border-border/30 pb-2 flex flex-wrap gap-x-2">
           <span className="font-semibold">{finding.provider}</span>
           <span>{finding.validity}</span>
           <span>{finding.repository}{finding.path ? ` / ${finding.path}` : ''}</span>
           {finding.branch && <span>branch: {finding.branch}</span>}
           {finding.encoded && <span>Base64</span>}
-          <span>{finding.source === 'github-secret-scanning' ? 'GitHub alert' : 'branch snapshot'}</span>
+          <span>{finding.source === 'github-secret-scanning' ? 'GitHub alert' : finding.source === 'commit-diff' ? 'commit history' : 'branch snapshot'}</span>
           {finding.url && <a href={finding.url} target="_blank" rel="noopener noreferrer" className="text-amber-500 underline">View location</a>}
         </div>
       ))}
-      {data.findings.length === 0 && <p className="text-muted-foreground">No findings synced yet. Check the repository coverage and alert permission above.</p>}
+      {data && data.findings.length === 0 && <p className="text-muted-foreground">No findings synced yet. Check the repository coverage and alert permission above.</p>}
     </div>
   );
 };

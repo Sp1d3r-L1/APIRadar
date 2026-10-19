@@ -208,6 +208,10 @@ type VerificationStatus = {
   enabled: boolean;
   scope: string;
   repositories: number;
+  discoveredRepositories: number;
+  visitedRepositories: number;
+  installedRepositories: number;
+  queuedRepositories: number;
   findings: number;
   validity: Record<string, number>;
   lastScannedAt: string | null;
@@ -221,14 +225,18 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/verification/status', { cache: 'no-store' })
-      .then(async response => {
-        if (!response.ok) throw new Error('Verification service unavailable.');
-        return response.json() as Promise<VerificationStatus>;
-      })
-      .then(value => { if (!cancelled) setStatus(value); })
-      .catch(error => { if (!cancelled) setMessage(error.message); });
-    return () => { cancelled = true; };
+    const refresh = () => {
+      fetch('/api/verification/status', { cache: 'no-store' })
+        .then(async response => {
+          if (!response.ok) throw new Error('Verification service unavailable.');
+          return response.json() as Promise<VerificationStatus>;
+        })
+        .then(value => { if (!cancelled) setStatus(value); })
+        .catch(error => { if (!cancelled) setMessage(error.message); });
+    };
+    refresh();
+    const interval = setInterval(refresh, 60_000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
   useEffect(() => {
@@ -248,13 +256,17 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
     <div className="overflow-y-auto p-4 sm:p-6 space-y-4 text-xs sm:text-sm">
       <div className="flex flex-wrap gap-3 items-center">
         <strong>Live Verification</strong>
-        <span>{status ? (status.enabled ? 'Installation sync enabled' : 'Installation sync disabled') : message}</span>
-        {status && <span>{status.repositories} repositories · {status.findings} findings</span>}
+        <span>{status ? (status.enabled ? 'Public repository backfill enabled' : 'Public repository backfill disabled') : message}</span>
+        {status && <span>{status.repositories.toLocaleString()} queued or tracked repositories · {status.findings.toLocaleString()} findings</span>}
       </div>
       {status && <div className="flex flex-wrap gap-3 text-muted-foreground">
         <span>Active: {status.validity.active || 0}</span>
         <span>Inactive: {status.validity.inactive || 0}</span>
         <span>Unknown: {status.validity.unknown || 0}</span>
+        <span>Incremental discovery: {status.discoveredRepositories.toLocaleString()}</span>
+        <span>Backfill visited: {status.visitedRepositories.toLocaleString()}</span>
+        <span>Waiting: {status.queuedRepositories.toLocaleString()}</span>
+        <span>App installed: {status.installedRepositories.toLocaleString()}</span>
         {status.lastScannedAt && <span>Last scan: {new Date(status.lastScannedAt).toLocaleString()}</span>}
       </div>}
       {status?.coverage && <div className="flex flex-wrap gap-3 text-muted-foreground">
@@ -265,7 +277,8 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
         {status.coverage.alertsDenied > 0 && <span className="text-amber-500">GitHub alerts permission missing: {status.coverage.alertsDenied}</span>}
         {(status.coverage.missingPatches + status.coverage.skippedLarge + status.coverage.skippedBinary + status.coverage.skippedBlobs) > 0 && <span className="text-amber-500">Coverage gaps: {status.coverage.missingPatches + status.coverage.skippedLarge + status.coverage.skippedBinary + status.coverage.skippedBlobs}</span>}
       </div>}
-      <p className="text-muted-foreground">Scope: GitHub App installed public repositories. Global search remains limited to GitHub's indexed code.</p>
+      <p className="text-muted-foreground">Scope: public repositories observed by the existing global code search or public push feed, plus App installed public repositories. The queue is rate limited; a repository is covered only when its snapshot and history passes complete. Discovery is limited by GitHub search indexing and the public event feed.</p>
+      <p className="text-muted-foreground">GitHub secret scanning alerts are available only for App installed repositories; other public repositories use APIRadar branch and commit matching.</p>
       <p className="text-muted-foreground">GitHub reports active or inactive only for supported alert types. Branch and commit matches remain unknown. APIRadar does not test discovered credentials.</p>
       {!isAuthenticated && <div className="flex gap-2 items-center text-muted-foreground"><Lock className="h-4 w-4" /> Location details require operator sign-in. {onSignIn && <button className="text-amber-500 underline" onClick={onSignIn}>Sign in</button>}</div>}
       {isAuthenticated && !data && <p className="text-muted-foreground">{message}</p>}

@@ -1,13 +1,17 @@
 import { FastifyInstance } from 'fastify';
 import { authenticateUser, AuthenticatedRequest } from '../middleware/auth';
 import { RepositoryCoverage } from '../models/RepositoryCoverage';
+import { ScannedRepo } from '../models/ScannedRepo';
 import { VerificationFinding } from '../models/VerificationFinding';
 
 export async function verificationRoutes(server: FastifyInstance) {
   server.addHook('preValidation', authenticateUser);
   server.get('/verification/status', async (_request, reply) => {
-    const [repositories, findings, counts, last, coverage] = await Promise.all([
+    const [repositories, discoveredRepositories, visitedRepositories, installedRepositories, findings, counts, last, coverage] = await Promise.all([
       RepositoryCoverage.countDocuments(),
+      ScannedRepo.countDocuments(),
+      RepositoryCoverage.countDocuments({ lastScannedAt: { $exists: true } }),
+      RepositoryCoverage.countDocuments({ installed: true }),
       VerificationFinding.countDocuments(),
       VerificationFinding.aggregate<{ _id: string; count: number }>([
         { $group: { _id: '$validity', count: { $sum: 1 } } }
@@ -32,8 +36,9 @@ export async function verificationRoutes(server: FastifyInstance) {
     ]);
     return reply.send({
       enabled: process.env['INSTALLATION_COVERAGE_ENABLED'] === 'true',
-      scope: 'installed-public-repositories',
-      repositories, findings,
+      scope: 'observed-public-repositories',
+      repositories, discoveredRepositories, visitedRepositories, installedRepositories,
+      queuedRepositories: Math.max(0, repositories - visitedRepositories), findings,
       validity: Object.fromEntries(counts.map(item => [item._id, item.count])),
       lastScannedAt: last?.lastScannedAt || null,
       coverage: coverage[0] || null

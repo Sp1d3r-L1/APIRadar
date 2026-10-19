@@ -1,4 +1,4 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
+const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 
 // Request deduplication cache to prevent duplicate API calls
 const requestCache = new Map<string, { promise: Promise<any>; timestamp: number }>();
@@ -303,31 +303,3 @@ export async function fetchProviderStats(session?: any): Promise<ApiResponse<{ p
     return { error: error instanceof Error ? error.message : 'Failed to fetch provider stats' };
   }
 }
-
-export async function fetchLeakFullKey(leakId: string, session?: any): Promise<ApiResponse<{ redactedKey: string }>> {
-  try {
-    const headers = createAuthHeaders(session);
-    const response = await fetch(`${API_BASE_URL}/api/leaks/${leakId}/fullkey`, {
-      method: 'GET',
-      headers,
-    });
-
-    if (response.status === 401) {
-      return { error: 'Authentication required' };
-    }
-
-    if (response.status === 403) {
-      return { error: 'Full key access is disabled. Only redacted keys are available.' };
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
-    }
-
-    const data = await response.json();
-    return { data };
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : 'Failed to fetch full key' };
-  }
-} 

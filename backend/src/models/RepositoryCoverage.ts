@@ -2,6 +2,9 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IRepositoryCoverage extends Document {
   repository: string;
+  discoveredBySearch: boolean;
+  discoveredByEvents: boolean;
+  installed: boolean;
   lastScannedAt?: Date;
   branchesSeen: number;
   filesSeen: number;
@@ -21,13 +24,16 @@ export interface IRepositoryCoverage extends Document {
   missingPatches: number;
   historyCompleteAt?: Date;
   historyError?: string;
-  alertsPermission: 'ok' | 'denied' | 'unavailable' | 'error' | 'pending';
+  alertsPermission: 'ok' | 'denied' | 'unavailable' | 'error' | 'pending' | 'not-applicable';
   error?: string;
 }
 
 const schema = new Schema<IRepositoryCoverage>({
   repository: { type: String, required: true, unique: true },
-  lastScannedAt: Date,
+  discoveredBySearch: { type: Boolean, default: false },
+  discoveredByEvents: { type: Boolean, default: false },
+  installed: { type: Boolean, default: false },
+  lastScannedAt: { type: Date, index: true },
   branchesSeen: { type: Number, default: 0 },
   filesSeen: { type: Number, default: 0 },
   skippedBlobs: { type: Number, default: 0 },
@@ -49,5 +55,7 @@ const schema = new Schema<IRepositoryCoverage>({
   alertsPermission: { type: String, default: 'pending' },
   error: String
 }, { versionKey: false });
+
+schema.index({ lastScannedAt: 1, _id: 1 });
 
 export const RepositoryCoverage = mongoose.model<IRepositoryCoverage>('RepositoryCoverage', schema);

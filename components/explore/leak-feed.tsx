@@ -11,6 +11,10 @@ import {
   FileCode2,
   Lock,
   Mail,
+  Activity,
+  ArrowUpRight,
+  GitBranch,
+  History,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -201,7 +205,7 @@ FeedEmptyState.displayName = "FeedEmptyState";
 type VerificationData = {
   enabled: boolean;
   total: number;
-  coverage: Array<{ repository: string; branchesSeen: number; filesSeen: number; skippedBlobs: number; skippedLarge: number; skippedBinary: number; truncatedTrees: number; commitsSeen: number; missingPatches: number; historyCompleteAt?: string; historyError?: string; alertsPermission: string; snapshotCompleteAt?: string; error?: string }>;
+  coverage: Array<{ repository: string; installed: boolean; branchesSeen: number; filesSeen: number; skippedBlobs: number; skippedLarge: number; skippedBinary: number; truncatedTrees: number; commitsSeen: number; missingPatches: number; historyCompleteAt?: string; historyError?: string; alertsPermission: string; snapshotCompleteAt?: string; error?: string }>;
   findings: Array<{ repository: string; provider: string; path: string; branch?: string; encoded: boolean; source: string; state: string; validity: string; url: string; observedAt: string }>;
 };
 type VerificationStatus = {
@@ -242,72 +246,131 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
   useEffect(() => {
     if (!isAuthenticated) return;
     let cancelled = false;
-    fetch('/api/verification', { cache: 'no-store' })
-      .then(async response => {
-        if (!response.ok) throw new Error(response.status === 403 ? 'Operator access required.' : 'Verification service unavailable.');
-        return response.json() as Promise<VerificationData>;
-      })
-      .then(value => { if (!cancelled) setData(value); })
-      .catch(error => { if (!cancelled) setMessage(error.message); });
-    return () => { cancelled = true; };
+    const refresh = () => {
+      fetch('/api/verification', { cache: 'no-store' })
+        .then(async response => {
+          if (!response.ok) throw new Error(response.status === 403 ? 'Operator access required.' : 'Verification service unavailable.');
+          return response.json() as Promise<VerificationData>;
+        })
+        .then(value => { if (!cancelled) setData(value); })
+        .catch(error => { if (!cancelled) setMessage(error.message); });
+    };
+    refresh();
+    const interval = setInterval(refresh, 60_000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [isAuthenticated]);
 
+  const tracked = status?.repositories || 0;
+  const coverage = status?.coverage;
+  const snapshotComplete = coverage?.snapshotComplete || 0;
+  const historyComplete = coverage?.historyComplete || 0;
+  const gaps = (coverage?.missingPatches || 0) + (coverage?.skippedLarge || 0)
+    + (coverage?.skippedBinary || 0) + (coverage?.skippedBlobs || 0);
+  const progress = tracked > 0 ? Math.min(100, snapshotComplete / tracked * 100) : 0;
+  const activity = data?.coverage.filter(repo => repo.branchesSeen > 0 || repo.commitsSeen > 0 || repo.error || repo.historyError).slice(0, 12) || [];
+
   return (
-    <div className="overflow-y-auto p-4 sm:p-6 space-y-4 text-xs sm:text-sm">
-      <div className="flex flex-wrap gap-3 items-center">
-        <strong>Live Verification</strong>
-        <span>{status ? (status.enabled ? 'Public repository backfill enabled' : 'Public repository backfill disabled') : message}</span>
-        {status && <span>{status.repositories.toLocaleString()} queued or tracked repositories · {status.findings.toLocaleString()} findings</span>}
+    <div className="h-full overflow-y-auto custom-scrollbar text-xs sm:text-sm">
+      <div className="relative overflow-hidden border-b border-white/[0.07] bg-gradient-to-r from-amber-500/[0.07] via-transparent to-transparent px-5 py-5 sm:px-7 sm:py-6">
+        <div className="relative flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2 text-[9px] font-bold uppercase tracking-[0.2em] text-amber-500/80">
+              <Activity className="h-3 w-3" /> Evidence monitor
+            </div>
+            <h3 className="text-lg font-semibold tracking-tight text-foreground sm:text-xl">Live Verification</h3>
+            <p className="max-w-xl text-[11px] leading-relaxed text-muted-foreground sm:text-xs">
+              Branch snapshots and commit history across repositories found by public search and push activity.
+            </p>
+          </div>
+          <span className={cn("inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] font-semibold", status?.enabled ? "border-emerald-500/20 bg-emerald-500/[0.07] text-emerald-400" : "border-border/70 bg-background/40 text-muted-foreground")}>
+            <span className={cn("h-1.5 w-1.5 rounded-full", status?.enabled ? "bg-emerald-400" : "bg-muted-foreground")} />
+            {status ? (status.enabled ? "Backfill enabled" : "Backfill paused") : "Connecting"}
+          </span>
+        </div>
       </div>
-      {status && <div className="flex flex-wrap gap-3 text-muted-foreground">
-        <span>Active: {status.validity.active || 0}</span>
-        <span>Inactive: {status.validity.inactive || 0}</span>
-        <span>Unknown: {status.validity.unknown || 0}</span>
-        <span>Incremental discovery: {status.discoveredRepositories.toLocaleString()}</span>
-        <span>Backfill visited: {status.visitedRepositories.toLocaleString()}</span>
-        <span>Waiting: {status.queuedRepositories.toLocaleString()}</span>
-        <span>App installed: {status.installedRepositories.toLocaleString()}</span>
-        {status.lastScannedAt && <span>Last scan: {new Date(status.lastScannedAt).toLocaleString()}</span>}
-      </div>}
-      {status?.coverage && <div className="flex flex-wrap gap-3 text-muted-foreground">
-        <span>Branch heads: {status.coverage.branchesSeen}</span>
-        <span>Commit visits: {status.coverage.commitsSeen}</span>
-        <span>Snapshot passes: {status.coverage.snapshotComplete}/{status.repositories}</span>
-        <span>History passes: {status.coverage.historyComplete}/{status.repositories}</span>
-        {status.coverage.alertsDenied > 0 && <span className="text-amber-500">GitHub alerts permission missing: {status.coverage.alertsDenied}</span>}
-        {(status.coverage.missingPatches + status.coverage.skippedLarge + status.coverage.skippedBinary + status.coverage.skippedBlobs) > 0 && <span className="text-amber-500">Coverage gaps: {status.coverage.missingPatches + status.coverage.skippedLarge + status.coverage.skippedBinary + status.coverage.skippedBlobs}</span>}
-      </div>}
-      <p className="text-muted-foreground">Scope: public repositories observed by the existing global code search or public push feed, plus App installed public repositories. The queue is rate limited; a repository is covered only when its snapshot and history passes complete. Discovery is limited by GitHub search indexing and the public event feed.</p>
-      <p className="text-muted-foreground">GitHub secret scanning alerts are available only for App installed repositories; other public repositories use APIRadar branch and commit matching.</p>
-      <p className="text-muted-foreground">GitHub reports active or inactive only for supported alert types. Branch and commit matches remain unknown. APIRadar does not test discovered credentials.</p>
-      {!isAuthenticated && <div className="flex gap-2 items-center text-muted-foreground"><Lock className="h-4 w-4" /> Location details require operator sign-in. {onSignIn && <button className="text-amber-500 underline" onClick={onSignIn}>Sign in</button>}</div>}
-      {isAuthenticated && !data && <p className="text-muted-foreground">{message}</p>}
-      {data?.coverage.map(repo => (
-        <div key={repo.repository} className="border border-border/50 rounded p-2">
-          <strong>{repo.repository}</strong> · {repo.branchesSeen} branches · {repo.filesSeen} files · {repo.commitsSeen || 0} commits · alerts: {repo.alertsPermission}
-          {repo.truncatedTrees > 0 && <span> · {repo.truncatedTrees} trees recovered</span>}
-          {repo.skippedBlobs > 0 && <span> · {repo.skippedBlobs} skipped blobs</span>}
-          {repo.skippedLarge > 0 && <span> · {repo.skippedLarge} large files skipped</span>}
-          {repo.skippedBinary > 0 && <span> · {repo.skippedBinary} binary files skipped</span>}
-          {repo.missingPatches > 0 && <span> · {repo.missingPatches} commit patches unavailable</span>}
-          {repo.snapshotCompleteAt ? <span> · last complete pass {new Date(repo.snapshotCompleteAt).toLocaleString()}</span> : <span> · snapshot in progress</span>}
-          {repo.historyCompleteAt ? <span> · history pass completed {new Date(repo.historyCompleteAt).toLocaleString()}</span> : <span> · history in progress</span>}
-          {repo.error && <span className="text-amber-500"> · scan error</span>}
-          {repo.historyError && <span className="text-amber-500"> · history error</span>}
+
+      <div className="space-y-5 p-5 sm:p-7">
+        {!status && <p className="text-muted-foreground">{message}</p>}
+        {status && <>
+          <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+            {[
+              { label: "Discovered", value: status.discoveredRepositories, icon: FolderGit2, detail: "Public feed" },
+              { label: "Visited", value: status.visitedRepositories, icon: Activity, detail: "Backfill started" },
+              { label: "Snapshots", value: snapshotComplete, icon: GitBranch, detail: "Pass complete" },
+              { label: "History", value: historyComplete, icon: History, detail: "Pass complete" },
+            ].map(metric => <div key={metric.label} className="rounded-lg border border-white/[0.07] bg-white/[0.025] px-3.5 py-3.5 sm:px-4">
+              <div className="flex items-center justify-between text-[10px] font-medium text-muted-foreground">
+                <span>{metric.label}</span><metric.icon className="h-3.5 w-3.5 text-amber-500/65" />
+              </div>
+              <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums text-foreground sm:text-2xl">{metric.value.toLocaleString()}</div>
+              <div className="mt-1 text-[10px] text-muted-foreground/60">{metric.detail}</div>
+            </div>)}
+          </div>
+
+          <section className="rounded-lg border border-white/[0.07] bg-background/25 px-4 py-3.5">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 font-medium text-foreground/90"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Snapshot coverage</div>
+              <span className="font-mono text-[10px] tabular-nums text-muted-foreground">{snapshotComplete.toLocaleString()} / {tracked.toLocaleString()}</span>
+            </div>
+            <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/[0.08]" role="progressbar" aria-valuenow={snapshotComplete} aria-valuemin={0} aria-valuemax={tracked} aria-label="Completed repository snapshot passes">
+              <div className="h-full rounded-full bg-amber-500 transition-all duration-500" style={{ width: `${progress}%` }} />
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
+              <span>{status.queuedRepositories.toLocaleString()} waiting</span>
+              <span>{status.installedRepositories.toLocaleString()} App installed</span>
+              <span>{(coverage?.branchesSeen || 0).toLocaleString()} branch heads</span>
+              <span>{(coverage?.commitsSeen || 0).toLocaleString()} commits visited</span>
+            </div>
+          </section>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-md border border-red-500/15 bg-red-500/[0.05] px-2.5 py-1 text-[10px] text-red-300/90">Active <strong className="ml-1 tabular-nums">{status.validity.active || 0}</strong></span>
+            <span className="rounded-md border border-emerald-500/15 bg-emerald-500/[0.05] px-2.5 py-1 text-[10px] text-emerald-300/90">Inactive <strong className="ml-1 tabular-nums">{status.validity.inactive || 0}</strong></span>
+            <span className="rounded-md border border-white/[0.08] bg-white/[0.025] px-2.5 py-1 text-[10px] text-muted-foreground">Unknown <strong className="ml-1 tabular-nums text-foreground/80">{status.validity.unknown || 0}</strong></span>
+            {gaps > 0 && <span className="rounded-md border border-amber-500/15 bg-amber-500/[0.05] px-2.5 py-1 text-[10px] text-amber-400">{gaps.toLocaleString()} coverage gaps</span>}
+            {coverage && coverage.alertsDenied > 0 && <span className="text-[10px] text-amber-400">{coverage.alertsDenied} App alert permissions missing</span>}
+          </div>
+        </>}
+
+        <section className="space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <h4 className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground">Recent repository activity</h4>
+            {status?.lastScannedAt && <span className="text-[10px] text-muted-foreground/70">Updated {new Date(status.lastScannedAt).toLocaleString()}</span>}
+          </div>
+          {!isAuthenticated && <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-muted-foreground">
+            <span className="flex items-center gap-2"><Lock className="h-3.5 w-3.5" /> Repository locations require operator sign-in.</span>
+            {onSignIn && <button className="shrink-0 font-semibold text-amber-500 hover:text-amber-400" onClick={onSignIn}>Sign in</button>}
+          </div>}
+          {isAuthenticated && !data && <div className="rounded-lg border border-white/[0.07] px-4 py-3 text-muted-foreground">{message}</div>}
+          {activity.map(repo => {
+            const repoGaps = repo.skippedBlobs + repo.skippedLarge + repo.skippedBinary + repo.missingPatches;
+            return <div key={repo.repository} className="rounded-lg border border-white/[0.07] bg-white/[0.02] px-3.5 py-3 transition-colors hover:bg-white/[0.04] sm:px-4">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <div className="flex min-w-0 items-center gap-2"><FolderGit2 className="h-3.5 w-3.5 shrink-0 text-amber-500/70" /><span className="truncate font-medium text-foreground/90">{repo.repository}</span></div>
+                <span className={cn("text-[10px]", repo.error || repo.historyError ? "text-amber-400" : repo.snapshotCompleteAt && repo.historyCompleteAt ? "text-emerald-400/80" : "text-muted-foreground")}>{repo.error || repo.historyError ? "Needs attention" : repo.snapshotCompleteAt && repo.historyCompleteAt ? "Pass complete" : "In progress"}</span>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 pl-[22px] text-[10px] tabular-nums text-muted-foreground">
+                <span>{repo.branchesSeen} branches</span><span>{repo.filesSeen} files</span><span>{repo.commitsSeen} commits</span>
+                <span>{repo.installed ? "App alerts: " + repo.alertsPermission : "Pattern scan"}</span>
+                {repoGaps > 0 && <span className="text-amber-500/80">{repoGaps} gaps</span>}
+              </div>
+            </div>;
+          })}
+          {data && activity.length === 0 && <div className="rounded-lg border border-dashed border-white/[0.09] px-4 py-4 text-center text-muted-foreground">Backfill activity will appear here as repositories are visited.</div>}
+        </section>
+
+        {data && <section className="space-y-2.5">
+          <div className="flex items-center justify-between"><h4 className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground">Verification findings</h4><span className="text-[10px] tabular-nums text-muted-foreground">{data.total.toLocaleString()} total</span></div>
+          {data.findings.length === 0 ? <div className="rounded-lg border border-dashed border-white/[0.09] px-4 py-4 text-center text-muted-foreground">No branch, history, or GitHub alert findings recorded yet.</div> : data.findings.map((finding, index) => <div key={`${finding.repository}:${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-4 py-3">
+            <div className="min-w-0 space-y-1"><div className="flex items-center gap-2"><span className="font-semibold text-foreground/90">{finding.provider}</span><span className="text-[10px] capitalize text-muted-foreground">{finding.validity}</span>{finding.encoded && <span className="text-[10px] text-amber-400">Base64</span>}</div><div className="truncate text-[10px] text-muted-foreground">{finding.repository}{finding.path ? ` / ${finding.path}` : ""}{finding.branch ? ` · ${finding.branch}` : ""}</div></div>
+            {finding.url && <a href={finding.url} target="_blank" rel="noopener noreferrer" className="inline-flex shrink-0 items-center gap-1 text-[10px] font-semibold text-amber-500 hover:text-amber-400">View <ArrowUpRight className="h-3 w-3" /></a>}
+          </div>)}
+        </section>}
+
+        <div className="border-t border-white/[0.07] pt-3 text-[10px] leading-relaxed text-muted-foreground/70">
+          Coverage follows repositories observed by indexed public search and recent push events. GitHub alerts apply to App installed repositories; pattern matches have unknown validity. Scanning observes metadata and does not test credentials.
         </div>
-      ))}
-      {data?.findings.map((finding, index) => (
-        <div key={`${finding.repository}:${index}`} className="border-b border-border/30 pb-2 flex flex-wrap gap-x-2">
-          <span className="font-semibold">{finding.provider}</span>
-          <span>{finding.validity}</span>
-          <span>{finding.repository}{finding.path ? ` / ${finding.path}` : ''}</span>
-          {finding.branch && <span>branch: {finding.branch}</span>}
-          {finding.encoded && <span>Base64</span>}
-          <span>{finding.source === 'github-secret-scanning' ? 'GitHub alert' : finding.source === 'commit-diff' ? 'commit history' : 'branch snapshot'}</span>
-          {finding.url && <a href={finding.url} target="_blank" rel="noopener noreferrer" className="text-amber-500 underline">View location</a>}
-        </div>
-      ))}
-      {data && data.findings.length === 0 && <p className="text-muted-foreground">No findings synced yet. Check the repository coverage and alert permission above.</p>}
+      </div>
     </div>
   );
 };
@@ -482,7 +545,7 @@ const LeakFeedComponent = React.memo(
 
         {/* Feed content */}
         {activeTab === "working" ? (
-          <Card className="border-border/50 bg-card/40 backdrop-blur-sm overflow-hidden flex flex-col h-[380px] sm:h-[450px]">
+          <Card className="border-border/50 bg-card/40 backdrop-blur-sm overflow-hidden flex flex-col h-[480px] sm:h-[540px]">
              <VerificationPanel onSignIn={onSignIn} isAuthenticated={!isUnauthenticated} />
           </Card>
         ) : (

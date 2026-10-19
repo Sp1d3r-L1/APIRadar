@@ -3,7 +3,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface IVerificationFinding extends Document {
   repository: string;
   sourceId: string;
-  source: 'github-secret-scanning' | 'branch-snapshot';
+  source: 'github-secret-scanning' | 'branch-snapshot' | 'commit-diff';
   provider: string;
   path: string;
   branch?: string;
@@ -18,7 +18,7 @@ export interface IVerificationFinding extends Document {
 const schema = new Schema<IVerificationFinding>({
   repository: { type: String, required: true, index: true },
   sourceId: { type: String, required: true },
-  source: { type: String, required: true, enum: ['github-secret-scanning', 'branch-snapshot'] },
+  source: { type: String, required: true, enum: ['github-secret-scanning', 'branch-snapshot', 'commit-diff'] },
   provider: { type: String, required: true },
   path: { type: String, default: '' },
   branch: String,

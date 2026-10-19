@@ -125,14 +125,16 @@ validity. Enable secret scanning for each repository in GitHub. The operator ema
 match the Google account used to sign in. Alert sync requests `hide_secret=true`; the
 dashboard shows metadata only. GitHub returns `active`, `inactive`, or `unknown` only
 where validity checks are supported and available. Branch snapshot matches remain
-`unknown`.
+`unknown`. The public tab shows aggregate counts; repository and path details
+require an authenticated email in `VERIFICATION_OPERATOR_EMAILS`.
 
 The existing global code search still covers GitHub's indexed default branches and
 the public event listener watches recent pushes. The installation scan supplements
-these with branch heads and GitHub's all-branch history alerts for installed public
-repositories. It scans up to 200 small text blobs per pass, resumes from a saved
-branch/file cursor, and records truncated Git trees, skipped blobs, and scan errors. Files over
-128 KiB, binary files, and truncated tree entries are outside snapshot coverage.
+these with branch heads, reachable commit history, and GitHub's all-branch
+history alerts for installed public repositories. It scans up to 200 text blobs
+and 20 commits per pass, resumes from saved cursors, and walks truncated Git
+trees one subtree at a time. Files over 1 MiB, binary files, and commit files
+without a complete patch are reported as coverage gaps.
 The App installation does not grant access to secret scanning alerts for arbitrary
 public repositories. The former full-key download route has been removed.
 

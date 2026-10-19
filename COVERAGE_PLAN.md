@@ -8,7 +8,12 @@
   bounded Base64 literals and adjacent encoded-prefix/plain-suffix pairs before matching. Save only metadata and a one-way
   fingerprint; never copy a key into the verification collection.
 - Persist branch and file cursors so a 200-blob pass resumes on the next cycle.
-  Report skipped blobs, truncated Git trees, and scan errors.
+  Persist a stable branch-head list for each pass. Walk truncated Git trees one
+  subtree at a time. Report skipped blobs, files over 1 MiB, binary files,
+  and scan errors.
+- Walk reachable commit history on every installed branch in 20-commit passes.
+  Scan diff patches for secrets that disappeared from branch heads, and record
+  unavailable patches as an explicit coverage gap.
 - Import GitHub secret scanning alerts when the installation has `Secret scanning
   alerts: read`. GitHub's alert engine supplies history and all-branch coverage
   for its supported patterns.
@@ -26,10 +31,10 @@
 - GitHub code search only indexes default branches. This supplement covers
   installed public repositories; a GitHub App installation is not an entitlement
   to read arbitrary repositories' secret scanning alerts.
-- Files over 128 KiB, binary files, truncated recursive trees, and GitHub alert
-  patterns without Base64 or validity support remain gaps. The UI reports the
-  measurable gaps. Dynamic runtime assembly of a key also remains a gap. A future release can walk truncated trees nonrecursively and
-  add repository-owner-authorized validation for custom patterns.
+- Files over 1 MiB, binary files, unavailable or partial commit patches, and
+  GitHub alert patterns without Base64 or validity support remain gaps. The UI
+  reports the measurable gaps. Dynamic runtime assembly of a key and commits
+  unreachable from any branch remain outside this scanner's scope.
 - Enable `INSTALLATION_COVERAGE_ENABLED=true`, set
   `VERIFICATION_OPERATOR_EMAILS`, and grant the App the permissions described
   in the README. Existing installations must accept the App permission change.

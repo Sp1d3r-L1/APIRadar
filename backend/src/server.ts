@@ -95,8 +95,12 @@ async function bootstrap() {
 
   // 6. Start Background Services
   try {
-    await gitHubCodeLeakFarmService.start();
-    await gitHubEventsListener.start();
+    if (process.env['GITHUB_SCAN_ENABLED'] === 'true') {
+      await gitHubCodeLeakFarmService.start();
+      await gitHubEventsListener.start();
+    } else {
+      logger.warn('GitHub scanning is disabled until credentials are configured');
+    }
     installationCoverageService.start();
     await startBackupScheduler();
   } catch (serviceError) {

@@ -118,8 +118,11 @@ INSTALLATION_COVERAGE_ENABLED=true
 VERIFICATION_OPERATOR_EMAILS=you@example.com
 ```
 
-The **Live Verification** tab reads findings from repositories accessible to the GitHub App
-installation. Grant the App `Contents: read` for branch snapshots and, optionally,
+The **Live Verification** tab reads findings from public repositories discovered by the
+existing global code search or public push-event feed, as well as public repositories
+accessible to the GitHub App installation. Existing discoveries in `ScannedRepo` are
+imported into a durable branch/history queue on startup; later discoveries enter the
+same queue. Grant the App `Contents: read` for branch snapshots and, optionally,
 `Secret scanning alerts: read` to import GitHub's historical alerts and provider-reported
 validity. Enable secret scanning for each repository in GitHub. The operator email must
 match the Google account used to sign in. Alert sync requests `hide_secret=true`; the
@@ -129,14 +132,20 @@ where validity checks are supported and available. Branch snapshot matches remai
 require an authenticated email in `VERIFICATION_OPERATOR_EMAILS`.
 
 The existing global code search still covers GitHub's indexed default branches and
-the public event listener watches recent pushes. The installation scan supplements
-these with branch heads, reachable commit history, and GitHub's all-branch
-history alerts for installed public repositories. It scans up to 200 text blobs
-and 20 commits per pass, resumes from saved cursors, and walks truncated Git
+the public event listener watches recent pushes. The backfill now traverses branch
+heads and reachable commit history of every public repository those feeds discover.
+The App installation additionally supplies GitHub's secret scanning alerts for
+installed public repositories. A worker selects the oldest unvisited repository
+every 30 seconds, scans up to 20 text blobs and two commits per pass, and reserves
+1,500 GitHub core API requests for the incremental feeds. It resumes from saved
+cursors and walks truncated Git
 trees one subtree at a time. Files over 1 MiB, binary files, and commit files
 without a complete patch are reported as coverage gaps.
 The App installation does not grant access to secret scanning alerts for arbitrary
-public repositories. The former full-key download route has been removed.
+public repositories. Queued, visited, and completed counts in Live Verification
+distinguish scope registration from actual scan completion. Public search and event
+feeds do not enumerate every GitHub repository. The former full-key download route
+has been removed.
 
 ---
 

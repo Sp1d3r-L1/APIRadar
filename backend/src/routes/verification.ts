@@ -5,6 +5,40 @@ import { VerificationFinding } from '../models/VerificationFinding';
 
 export async function verificationRoutes(server: FastifyInstance) {
   server.addHook('preValidation', authenticateUser);
+  server.get('/verification/status', async (_request, reply) => {
+    const [repositories, findings, counts, last, coverage] = await Promise.all([
+      RepositoryCoverage.countDocuments(),
+      VerificationFinding.countDocuments(),
+      VerificationFinding.aggregate<{ _id: string; count: number }>([
+        { $group: { _id: '$validity', count: { $sum: 1 } } }
+      ]),
+      RepositoryCoverage.findOne().sort({ lastScannedAt: -1 }).select('lastScannedAt -_id').lean(),
+      RepositoryCoverage.aggregate<{
+        branchesSeen: number; commitsSeen: number; snapshotComplete: number;
+        historyComplete: number; missingPatches: number; skippedLarge: number;
+        skippedBinary: number; skippedBlobs: number; alertsDenied: number
+      }>([{ $group: {
+        _id: null,
+        branchesSeen: { $sum: '$branchesSeen' },
+        commitsSeen: { $sum: '$commitsSeen' },
+        snapshotComplete: { $sum: { $cond: [{ $ifNull: ['$snapshotCompleteAt', false] }, 1, 0] } },
+        historyComplete: { $sum: { $cond: [{ $ifNull: ['$historyCompleteAt', false] }, 1, 0] } },
+        missingPatches: { $sum: '$missingPatches' },
+        skippedLarge: { $sum: '$skippedLarge' },
+        skippedBinary: { $sum: '$skippedBinary' },
+        skippedBlobs: { $sum: '$skippedBlobs' },
+        alertsDenied: { $sum: { $cond: [{ $eq: ['$alertsPermission', 'denied'] }, 1, 0] } }
+      } }])
+    ]);
+    return reply.send({
+      enabled: process.env['INSTALLATION_COVERAGE_ENABLED'] === 'true',
+      scope: 'installed-public-repositories',
+      repositories, findings,
+      validity: Object.fromEntries(counts.map(item => [item._id, item.count])),
+      lastScannedAt: last?.lastScannedAt || null,
+      coverage: coverage[0] || null
+    });
+  });
   server.get('/verification', async (request: AuthenticatedRequest, reply) => {
     const operators = (process.env['VERIFICATION_OPERATOR_EMAILS'] || '')
       .split(',').map(email => email.trim().toLowerCase()).filter(Boolean);

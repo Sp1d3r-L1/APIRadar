@@ -81,26 +81,6 @@ export const getProviderStatsSchema = {
   }
 };
 
-export const getLeakFullKeySchema = {
-  params: {
-    type: 'object',
-    properties: { id: { type: 'string' } },
-    required: ['id']
-  },
-  response: {
-    200: {
-      type: 'object',
-      properties: { fullKey: { type: 'string' } }
-    },
-    401: errorSchema,
-    403: {
-      type: 'object',
-      properties: { error: { type: 'string' }, upgradeRequired: { type: 'boolean' } }
-    },
-    404: errorSchema
-  }
-};
-
 function buildQueryFilter(provider?: string): Record<string, any> {
   const filter: Record<string, any> = {};
   if (provider && provider !== 'all') {
@@ -232,42 +212,6 @@ export async function getLeaksHandler(request: AuthenticatedRequest, reply: Fast
   } catch (error) {
     request.log.error('Error fetching leaks:', error);
     return reply.status(500).send({ error: 'Failed to fetch leaks' });
-  }
-}
-
-export async function getLeakFullKeyHandler(request: AuthenticatedRequest, reply: FastifyReply) {
-  try {
-    if (!request.user?.isAuthenticated) {
-      return reply.status(403).send({ error: 'Full key access requires authentication' });
-    }
-
-    const { id } = request.params as { id: string };
-
-    let fullKey = '';
-    try {
-      const leak = await Leak.findById(id)
-        .select('secretId')
-        .populate<{ secretId: { encryptedKey?: string } }>('secretId', 'encryptedKey')
-        .lean();
-
-      if (leak?.secretId?.encryptedKey) {
-        const AES_KEY = getEncryptionKey();
-        fullKey = decrypt(leak.secretId.encryptedKey, AES_KEY);
-      }
-    } catch (dbErr) {
-      request.log.error({ msg: 'DB error', error: String(dbErr) });
-      return reply.status(503).send({ error: 'Database unavailable' });
-    }
-
-    if (!fullKey) {
-      return reply.status(404).send({ error: 'Leak or Secret not found' });
-    }
-
-    request.log.info({ msg: 'Full key securely decrypted and accessed', userId: request.user.id, leakId: id });
-    return reply.send({ fullKey });
-  } catch (error) {
-    request.log.error('Error fetching full key:', error);
-    return reply.status(500).send({ error: 'Failed to fetch full key' });
   }
 }
 

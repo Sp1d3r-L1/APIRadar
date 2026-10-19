@@ -1,7 +1,7 @@
 import { logger } from '../utils/logger';
 import { githubService } from './github';
 import { ILeak } from '../models/Leak';
-import { ScannedRepo } from '../models/ScannedRepo';
+import { recordPublicRepositories } from './CoverageDiscoveryService';
 import { gitHubAppAuthService } from './GitHubAppAuthService';
 import axios from 'axios';
 import { ConfigurationService } from './ConfigurationService';
@@ -675,9 +675,7 @@ export class GitHubCodeLeakFarmService {
   }
   private async processSearchResults(items: GitHubSearchItem[], query: string): Promise<void> {
     const uniqueRepos = Array.from(new Set(items.map(i => i.repository.full_name)));
-    for (const repoName of uniqueRepos) {
-      ScannedRepo.updateOne({ fullName: repoName }, { $set: { lastScannedAt: new Date() } }, { upsert: true }).exec().catch(() => { });
-    }
+    await recordPublicRepositories(uniqueRepos, 'search');
     let processedCount = 0;
     let skippedCount = 0;
     const fileConcurrencyManager = new ConcurrencyManager(FILE_CONCURRENCY);

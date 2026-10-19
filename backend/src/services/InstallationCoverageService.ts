@@ -4,6 +4,7 @@ import { gitHubAppAuthService } from './GitHubAppAuthService';
 import { regexRouter } from './RegexRouter';
 import { VerificationFinding } from '../models/VerificationFinding';
 import { RepositoryCoverage } from '../models/RepositoryCoverage';
+import { importDiscoveredRepositories } from './CoverageDiscoveryService';
 import { logger } from '../utils/logger';
 
 type Repository = { full_name: string; private: boolean };
@@ -23,10 +24,13 @@ type SecretAlert = {
 };
 
 const API = 'https://api.github.com';
-const MAX_BLOBS_PER_PASS = 200;
+const MAX_BLOBS_PER_PASS = 20;
 const MAX_BLOB_BYTES = 1024 * 1024;
-const MAX_COMMITS_PER_PASS = 20;
-const INTERVAL_MS = 15 * 60 * 1000;
+const MAX_COMMITS_PER_PASS = 2;
+const INTERVAL_MS = 30 * 1000;
+const CORE_RESERVE = 1500;
+
+class CoreBudgetExhausted extends Error {}
 
 /** Decode bounded, printable Base64 literals and run the normal rules on their content. */
 export function scanEncodedContent(content: string): Array<{ key: string; provider: string; encoded: boolean }> {
@@ -62,12 +66,19 @@ export function scanEncodedContent(content: string): Array<{ key: string; provid
 class InstallationCoverageService {
   private timer?: NodeJS.Timeout;
   private running = false;
+  private importPromise: Promise<void> | undefined;
+  private coreRemaining: number | null = null;
+  private coreResetAt = 0;
 
   start(): void {
     if (process.env['INSTALLATION_COVERAGE_ENABLED'] !== 'true') return;
+    this.importPromise = importDiscoveredRepositories().catch(error => {
+      this.importPromise = undefined;
+      throw error;
+    });
     this.timer = setInterval(() => { void this.runOnce(); }, INTERVAL_MS);
     void this.runOnce();
-    logger.init('[COVERAGE] Installation repository scanning enabled');
+    logger.init('[COVERAGE] Public discovery repository scanning enabled');
   }
 
   stop(): void {
@@ -75,12 +86,32 @@ class InstallationCoverageService {
   }
 
   private async get<T>(url: string, token: string, params?: Record<string, unknown>): Promise<T> {
-    const response = await axios.get<T>(`${API}${url}`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
-      params,
-      timeout: 20000
-    });
-    return response.data;
+    if (this.coreRemaining !== null && this.coreRemaining <= CORE_RESERVE && Date.now() < this.coreResetAt) {
+      throw new CoreBudgetExhausted(`Core API reserve reached; resumes after ${new Date(this.coreResetAt).toISOString()}`);
+    }
+    try {
+      const response = await axios.get<T>(`${API}${url}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+        params,
+        timeout: 20000
+      });
+      const remaining = Number(response.headers['x-ratelimit-remaining']);
+      const reset = Number(response.headers['x-ratelimit-reset']);
+      if (Number.isFinite(remaining)) this.coreRemaining = remaining;
+      if (Number.isFinite(reset)) this.coreResetAt = reset * 1000;
+      return response.data;
+    } catch (error) {
+      const response = (error as AxiosError).response;
+      const remaining = Number(response?.headers?.['x-ratelimit-remaining']);
+      const reset = Number(response?.headers?.['x-ratelimit-reset']);
+      if (response && Number.isFinite(remaining)) this.coreRemaining = remaining;
+      if (response && Number.isFinite(reset)) this.coreResetAt = reset * 1000;
+      if (response?.status === 429 || (response?.status === 403 && remaining === 0)) {
+        this.coreRemaining = 0;
+        this.coreResetAt = Math.max(this.coreResetAt, Date.now() + 60_000);
+      }
+      throw error;
+    }
   }
 
   private async pages<T>(url: string, token: string, params?: Record<string, unknown>): Promise<T[]> {
@@ -212,14 +243,26 @@ class InstallationCoverageService {
     if (this.running) return;
     this.running = true;
     try {
+      if (!this.importPromise) this.importPromise = importDiscoveredRepositories();
+      await this.importPromise;
+      if (this.coreRemaining !== null && this.coreRemaining <= CORE_RESERVE && Date.now() < this.coreResetAt) return;
       const token = await gitHubAppAuthService.getValidToken();
-      const repos = await this.repositories(token);
-      if (!repos.length) return;
-      const states = await RepositoryCoverage.find({ repository: { $in: repos.map(r => r.full_name) } }).lean();
-      const byRepo = new Map(states.map(s => [s.repository, s]));
-      repos.sort((a, b) => (byRepo.get(a.full_name)?.lastScannedAt?.getTime() || 0) - (byRepo.get(b.full_name)?.lastScannedAt?.getTime() || 0));
-      const repository = repos[0]!.full_name;
-      await this.scanRepository(repository, token);
+      // Refresh the installation set periodically; public repository discovery is continuous.
+      if (!this.installedAt || Date.now() - this.installedAt > 15 * 60_000) {
+        const repos = await this.repositories(token);
+        if (repos.length) {
+          await RepositoryCoverage.bulkWrite(repos.map(repo => ({ updateOne: {
+            filter: { repository: repo.full_name },
+            update: { $setOnInsert: { repository: repo.full_name }, $set: { installed: true } },
+            upsert: true
+          } })), { ordered: false });
+        }
+        this.installedAt = Date.now();
+      }
+      const next = await RepositoryCoverage.findOne().sort({ lastScannedAt: 1, _id: 1 }).lean();
+      if (!next) return;
+      const repository = next.repository;
+      await this.scanRepository(repository, token, next.installed);
       await this.scanHistory(repository, token);
     } catch (error) {
       logger.warn(`[COVERAGE] Pass failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -227,6 +270,8 @@ class InstallationCoverageService {
       this.running = false;
     }
   }
+
+  private installedAt = 0;
 
   private async syncAlerts(repository: string, token: string): Promise<'ok' | 'denied' | 'unavailable' | 'error'> {
     try {
@@ -255,9 +300,9 @@ class InstallationCoverageService {
     }
   }
 
-  private async scanRepository(repository: string, token: string): Promise<void> {
+  private async scanRepository(repository: string, token: string, installed: boolean): Promise<void> {
     const previous = await RepositoryCoverage.findOne({ repository }).lean();
-    const alertsPermission = await this.syncAlerts(repository, token);
+    const alertsPermission = installed ? await this.syncAlerts(repository, token) : 'not-applicable';
     let cursorBranch = previous?.cursorBranch || 0;
     let cursorFile = previous?.cursorFile || 0;
     let heads = previous?.snapshotHeads?.length ? previous.snapshotHeads : await this.branches(repository, token);
@@ -303,6 +348,7 @@ class InstallationCoverageService {
             }
             filesSeen++;
           } catch (blobError) {
+            if (blobError instanceof CoreBudgetExhausted || [403, 429].includes((blobError as AxiosError).response?.status || 0)) throw blobError;
             skippedBlobs++;
             logger.warn(`[COVERAGE] Blob skipped in ${repository}: ${blobError instanceof Error ? blobError.message : String(blobError)}`);
           }

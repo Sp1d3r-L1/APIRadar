@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger';
 import { gitHubAppAuthService } from './GitHubAppAuthService';
+import { recordPublicRepositories } from './CoverageDiscoveryService';
 import { regexRouter } from './RegexRouter';
 import { isValidKey } from './apiKeyValidator';
 import { ConcurrencyManager } from '../utils/concurrencyManager';
@@ -168,6 +169,7 @@ export class GitHubEventsListener {
 
     const events: GitHubEvent[] = res.data || [];
     const pushEvents = events.filter(e => e.type === 'PushEvent');
+    await recordPublicRepositories(pushEvents.map(event => event.repo.name), 'events');
 
     let enqueued = 0;
     for (const event of pushEvents) {

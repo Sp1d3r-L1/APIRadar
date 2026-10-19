@@ -4,7 +4,8 @@ import jwt from 'jsonwebtoken';
 
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
-  if (!origin || origin !== request.nextUrl.origin || !request.headers.get('content-type')?.startsWith('application/json')) {
+  const siteOrigin = process.env.NEXTAUTH_URL ? new URL(process.env.NEXTAUTH_URL).origin : request.nextUrl.origin;
+  if (!origin || origin !== siteOrigin || !request.headers.get('content-type')?.startsWith('application/json')) {
     return NextResponse.json({ error: 'Same-origin JSON request required' }, { status: 403 });
   }
   const token = await getToken({ req: request, secret: process.env.NEXTAUTH_SECRET });

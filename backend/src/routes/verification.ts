@@ -39,6 +39,7 @@ export async function verificationRoutes(server: FastifyInstance) {
       enabled: process.env['INSTALLATION_COVERAGE_ENABLED'] === 'true',
       scope: 'observed-public-repositories',
       ratePausedUntil: installationCoverageService.getRatePauseUntil(),
+      installations: installationCoverageService.getInstallationCapacity(),
       repositories, discoveredRepositories, visitedRepositories, installedRepositories,
       queuedRepositories: Math.max(0, repositories - visitedRepositories), findings,
       validity: Object.fromEntries(counts.map(item => [item._id, item.count])),

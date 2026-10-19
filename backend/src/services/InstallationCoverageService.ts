@@ -9,6 +9,8 @@ import { logger } from '../utils/logger';
 type Repository = { full_name: string; private: boolean };
 type Branch = { name: string; commit: { sha: string } };
 type TreeEntry = { path: string; type: string; sha: string; size?: number };
+type CommitSummary = { sha: string };
+type CommitDetail = { files?: Array<{ filename: string; patch?: string }> };
 type SecretAlert = {
   number: number;
   state: string;
@@ -22,7 +24,8 @@ type SecretAlert = {
 
 const API = 'https://api.github.com';
 const MAX_BLOBS_PER_PASS = 200;
-const MAX_BLOB_BYTES = 128 * 1024;
+const MAX_BLOB_BYTES = 1024 * 1024;
+const MAX_COMMITS_PER_PASS = 20;
 const INTERVAL_MS = 15 * 60 * 1000;
 
 /** Decode bounded, printable Base64 literals and run the normal rules on their content. */
@@ -100,6 +103,111 @@ class InstallationCoverageService {
     return result;
   }
 
+  private async branches(repository: string, token: string): Promise<Array<{ name: string; sha: string }>> {
+    const branches = await this.pages<Branch>(`/repos/${repository}/branches`, token);
+    return branches.map(branch => ({ name: branch.name, sha: branch.commit.sha }));
+  }
+
+  private async treeFiles(repository: string, sha: string, token: string): Promise<{ files: TreeEntry[]; fallbackUsed: boolean }> {
+    const commit = await this.get<{ tree: { sha: string } }>(`/repos/${repository}/git/commits/${sha}`, token);
+    const treeSha = commit.tree.sha;
+    const recursive = await this.get<{ tree: TreeEntry[]; truncated: boolean }>(`/repos/${repository}/git/trees/${treeSha}`, token, { recursive: 1 });
+    if (!recursive.truncated) return { files: recursive.tree.filter(entry => entry.type === 'blob'), fallbackUsed: false };
+
+    // GitHub truncates large recursive trees. Walk subtrees without recursive=1.
+    const queue: Array<{ sha: string; path: string }> = [{ sha: treeSha, path: '' }];
+    const files: TreeEntry[] = [];
+    while (queue.length) {
+      const current = queue.shift()!;
+      const tree = await this.get<{ tree: TreeEntry[]; truncated: boolean }>(`/repos/${repository}/git/trees/${current.sha}`, token);
+      if (tree.truncated) throw new Error(`Unresolved tree truncation at ${current.path || '/'}`);
+      for (const entry of tree.tree) {
+        const path = current.path ? `${current.path}/${entry.path}` : entry.path;
+        if (entry.type === 'tree') queue.push({ sha: entry.sha, path });
+        if (entry.type === 'blob') files.push({ ...entry, path });
+      }
+    }
+    return { files, fallbackUsed: true };
+  }
+
+  private async scanHistory(repository: string, token: string): Promise<void> {
+    const previous = await RepositoryCoverage.findOne({ repository }).lean();
+    let heads = previous?.historyHeads?.length ? previous.historyHeads : await this.branches(repository, token);
+    let branchIndex = previous?.historyCursorBranch || 0;
+    let page = previous?.historyCursorPage || 1;
+    let index = previous?.historyCursorIndex || 0;
+    const resuming = branchIndex > 0 || page > 1 || index > 0;
+    let commitsSeen = resuming ? previous?.commitsSeen || 0 : 0;
+    let missingPatches = resuming ? previous?.missingPatches || 0 : 0;
+    let budget = MAX_COMMITS_PER_PASS;
+    let historyError = '';
+    let completed = false;
+
+    try {
+      while (branchIndex < heads.length && budget > 0) {
+        const head = heads[branchIndex]!;
+        const batch = await this.get<CommitSummary[]>(`/repos/${repository}/commits`, token, { sha: head.sha, per_page: 100, page });
+        if (index >= batch.length) {
+          if (batch.length < 100) {
+            branchIndex++;
+            page = 1;
+          } else {
+            page++;
+          }
+          index = 0;
+          continue;
+        }
+        const commit = batch[index]!;
+        let filePage = 1;
+        while (true) {
+          const detail = await this.get<CommitDetail>(`/repos/${repository}/commits/${commit.sha}`, token, { per_page: 100, page: filePage });
+          const files = detail.files || [];
+          for (const file of files) {
+            if (!file.patch) {
+              missingPatches++;
+              continue;
+            }
+            for (const finding of scanEncodedContent(file.patch)) {
+              const fingerprint = createHash('sha256').update(finding.key).digest('hex');
+              const sourceId = `commit:${commit.sha}:${file.filename}:${fingerprint}`;
+              await VerificationFinding.updateOne({ repository, sourceId }, { $set: {
+                repository, sourceId, source: 'commit-diff', provider: finding.provider,
+                path: file.filename, branch: head.name, commitSha: commit.sha,
+                encoded: finding.encoded, state: 'historical', validity: 'unknown',
+                url: `https://github.com/${repository}/commit/${commit.sha}`,
+                observedAt: new Date()
+              } }, { upsert: true });
+            }
+          }
+          if (files.length < 100 || filePage >= 3) {
+            if (files.length === 100 && filePage >= 3) missingPatches++;
+            break;
+          }
+          filePage++;
+        }
+        commitsSeen++;
+        budget--;
+        index++;
+      }
+      completed = branchIndex >= heads.length;
+    } catch (error) {
+      historyError = error instanceof Error ? error.message : String(error);
+      logger.warn(`[COVERAGE] History scan failed for ${repository}: ${historyError}`);
+    }
+    if (completed) {
+      heads = [];
+      branchIndex = 0;
+      page = 1;
+      index = 0;
+    }
+    await RepositoryCoverage.updateOne({ repository }, { $set: {
+      repository, historyHeads: heads, historyCursorBranch: branchIndex,
+      historyCursorPage: page, historyCursorIndex: index, commitsSeen,
+      missingPatches, historyError,
+      ...(completed ? { historyCompleteAt: new Date() } : {})
+    } }, { upsert: true });
+  }
+
   async runOnce(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -110,7 +218,9 @@ class InstallationCoverageService {
       const states = await RepositoryCoverage.find({ repository: { $in: repos.map(r => r.full_name) } }).lean();
       const byRepo = new Map(states.map(s => [s.repository, s]));
       repos.sort((a, b) => (byRepo.get(a.full_name)?.lastScannedAt?.getTime() || 0) - (byRepo.get(b.full_name)?.lastScannedAt?.getTime() || 0));
-      await this.scanRepository(repos[0]!.full_name, token);
+      const repository = repos[0]!.full_name;
+      await this.scanRepository(repository, token);
+      await this.scanHistory(repository, token);
     } catch (error) {
       logger.warn(`[COVERAGE] Pass failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -150,21 +260,24 @@ class InstallationCoverageService {
     const alertsPermission = await this.syncAlerts(repository, token);
     let cursorBranch = previous?.cursorBranch || 0;
     let cursorFile = previous?.cursorFile || 0;
+    let heads = previous?.snapshotHeads?.length ? previous.snapshotHeads : await this.branches(repository, token);
     const resuming = cursorBranch > 0 || cursorFile > 0;
     let branchesSeen = resuming ? previous?.branchesSeen || 0 : 0;
     let filesSeen = resuming ? previous?.filesSeen || 0 : 0;
     let skippedBlobs = resuming ? previous?.skippedBlobs || 0 : 0;
+    let skippedLarge = resuming ? previous?.skippedLarge || 0 : 0;
+    let skippedBinary = resuming ? previous?.skippedBinary || 0 : 0;
     let truncatedTrees = resuming ? previous?.truncatedTrees || 0 : 0;
     let budget = MAX_BLOBS_PER_PASS;
     let error = '';
 
     try {
-      const branches = await this.pages<Branch>(`/repos/${repository}/branches`, token);
-      while (cursorBranch < branches.length && budget > 0) {
-        const branch = branches[cursorBranch]!;
-        const tree = await this.get<{ tree: TreeEntry[]; truncated: boolean }>(`/repos/${repository}/git/trees/${branch.commit.sha}`, token, { recursive: 1 });
-        if (tree.truncated && cursorFile === 0) truncatedTrees++;
-        const files = tree.tree.filter(entry => entry.type === 'blob' && (entry.size || 0) <= MAX_BLOB_BYTES);
+      while (cursorBranch < heads.length && budget > 0) {
+        const branch = heads[cursorBranch]!;
+        const tree = await this.treeFiles(repository, branch.sha, token);
+        if (tree.fallbackUsed && cursorFile === 0) truncatedTrees++;
+        if (cursorFile === 0) skippedLarge += tree.files.filter(entry => (entry.size || 0) > MAX_BLOB_BYTES).length;
+        const files = tree.files.filter(entry => (entry.size || 0) <= MAX_BLOB_BYTES);
         while (cursorFile < files.length && budget > 0) {
           const file = files[cursorFile]!;
           budget--;
@@ -179,14 +292,14 @@ class InstallationCoverageService {
                   await VerificationFinding.updateOne(
                     { repository, sourceId },
                     { $set: { repository, sourceId, source: 'branch-snapshot', provider: finding.provider,
-                      path: file.path, branch: branch.name, commitSha: branch.commit.sha,
+                      path: file.path, branch: branch.name, commitSha: branch.sha,
                       encoded: finding.encoded, state: 'observed', validity: 'unknown',
-                      url: `https://github.com/${repository}/blob/${branch.commit.sha}/${file.path.split('/').map(encodeURIComponent).join('/')}`,
+                      url: `https://github.com/${repository}/blob/${branch.sha}/${file.path.split('/').map(encodeURIComponent).join('/')}`,
                       observedAt: new Date() } },
                     { upsert: true }
                   );
                 }
-              }
+              } else skippedBinary++;
             }
             filesSeen++;
           } catch (blobError) {
@@ -201,20 +314,23 @@ class InstallationCoverageService {
           branchesSeen++;
         }
       }
-      const complete = cursorBranch >= branches.length;
+      const complete = cursorBranch >= heads.length;
       if (complete) {
+        heads = [];
         cursorBranch = 0;
         cursorFile = 0;
       }
       await RepositoryCoverage.updateOne({ repository }, { $set: {
-        repository, lastScannedAt: new Date(), branchesSeen: complete ? branches.length : branchesSeen,
-        filesSeen, skippedBlobs, truncatedTrees, cursorBranch, cursorFile, alertsPermission, error,
+        repository, lastScannedAt: new Date(), branchesSeen,
+        filesSeen, skippedBlobs, skippedLarge, skippedBinary, truncatedTrees,
+        snapshotHeads: heads, cursorBranch, cursorFile, alertsPermission, error,
         ...(complete ? { snapshotCompleteAt: new Date() } : {})
       } }, { upsert: true });
     } catch (scanError) {
       error = scanError instanceof Error ? scanError.message : String(scanError);
       await RepositoryCoverage.updateOne({ repository }, { $set: {
-        repository, lastScannedAt: new Date(), branchesSeen, filesSeen, skippedBlobs, truncatedTrees,
+        repository, lastScannedAt: new Date(), branchesSeen, filesSeen, skippedBlobs,
+        skippedLarge, skippedBinary, truncatedTrees, snapshotHeads: heads,
         cursorBranch, cursorFile, alertsPermission, error
       } }, { upsert: true });
       logger.warn(`[COVERAGE] Repository scan failed for ${repository}: ${error}`);

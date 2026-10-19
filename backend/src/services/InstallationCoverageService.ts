@@ -70,6 +70,11 @@ class InstallationCoverageService {
   private coreRemaining: number | null = null;
   private coreResetAt = 0;
 
+  getRatePauseUntil(): string | null {
+    return this.coreRemaining !== null && this.coreRemaining <= CORE_RESERVE && Date.now() < this.coreResetAt
+      ? new Date(this.coreResetAt).toISOString() : null;
+  }
+
   start(): void {
     if (process.env['INSTALLATION_COVERAGE_ENABLED'] !== 'true') return;
     this.importPromise = importDiscoveredRepositories().catch(error => {

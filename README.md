@@ -119,6 +119,7 @@ GITHUB_APP_INSTALLATION_ID=your_primary_installation_id
 # GITHUB_COVERAGE_INSTALLATION_IDS=second_installation_id,third_installation_id
 INSTALLATION_COVERAGE_ENABLED=true
 VERIFICATION_OPERATOR_EMAILS=you@example.com
+SECRET_VERIFICATION_QUEUE_ENABLED=true
 ```
 
 The **Live Verification** tab reads findings from public repositories discovered by the
@@ -133,6 +134,19 @@ dashboard shows metadata only. GitHub returns `active`, `inactive`, or `unknown`
 where validity checks are supported and available. Branch snapshot matches remain
 `unknown`. The public tab shows aggregate counts; repository and path details
 require an authenticated email in `VERIFICATION_OPERATOR_EMAILS`.
+
+Stored `Secret` records enter a separate review queue when
+`SECRET_VERIFICATION_QUEUE_ENABLED=true`. Startup backfills existing records,
+and new findings are queued after ingestion. Jobs deduplicate by secret ID and
+retain a detected provider, source count, and review gate. A generic `sk-`
+match is classified as OpenAI-compatible until its actual provider can be
+attributed. The Live Verification panel shows per-provider queue counts.
+Only an email in `VERIFICATION_OPERATOR_EMAILS` can use the manual **Start
+review** control. That pass rereads current public source files for API URL
+clues and records only provider hints, inspection status, and timestamps; it
+does not store file contents or send authentication requests using discovered
+keys. A file may have changed since detection, and multiple provider URLs in
+one file remain ambiguous. Queue and source hints do not establish validity.
 
 The existing global code search still covers GitHub's indexed default branches and
 the public event listener watches recent pushes. The backfill now traverses branch

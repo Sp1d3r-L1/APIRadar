@@ -114,7 +114,27 @@ GITHUB_APP_ID=your_github_app_id
 GITHUB_APP_CLIENT_ID=your_github_app_client_id
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
 # GITHUB_APP_PRIVATE_KEY_PATH=keys/github-app.private-key.pem
+INSTALLATION_COVERAGE_ENABLED=true
+VERIFICATION_OPERATOR_EMAILS=you@example.com
 ```
+
+The **Live Verification** tab reads findings from repositories accessible to the GitHub App
+installation. Grant the App `Contents: read` for branch snapshots and, optionally,
+`Secret scanning alerts: read` to import GitHub's historical alerts and provider-reported
+validity. Enable secret scanning for each repository in GitHub. The operator email must
+match the Google account used to sign in. Alert sync requests `hide_secret=true`; the
+dashboard shows metadata only. GitHub returns `active`, `inactive`, or `unknown` only
+where validity checks are supported and available. Branch snapshot matches remain
+`unknown`.
+
+The existing global code search still covers GitHub's indexed default branches and
+the public event listener watches recent pushes. The installation scan supplements
+these with branch heads and GitHub's all-branch history alerts for installed public
+repositories. It scans up to 200 small text blobs per pass, resumes from a saved
+branch/file cursor, and records truncated Git trees, skipped blobs, and scan errors. Files over
+128 KiB, binary files, and truncated tree entries are outside snapshot coverage.
+The App installation does not grant access to secret scanning alerts for arbitrary
+public repositories. The former full-key download route has been removed.
 
 ---
 

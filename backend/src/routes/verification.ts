@@ -3,6 +3,7 @@ import { authenticateUser, AuthenticatedRequest } from '../middleware/auth';
 import { RepositoryCoverage } from '../models/RepositoryCoverage';
 import { ScannedRepo } from '../models/ScannedRepo';
 import { VerificationFinding } from '../models/VerificationFinding';
+import { installationCoverageService } from '../services/InstallationCoverageService';
 
 export async function verificationRoutes(server: FastifyInstance) {
   server.addHook('preValidation', authenticateUser);
@@ -37,6 +38,7 @@ export async function verificationRoutes(server: FastifyInstance) {
     return reply.send({
       enabled: process.env['INSTALLATION_COVERAGE_ENABLED'] === 'true',
       scope: 'observed-public-repositories',
+      ratePausedUntil: installationCoverageService.getRatePauseUntil(),
       repositories, discoveredRepositories, visitedRepositories, installedRepositories,
       queuedRepositories: Math.max(0, repositories - visitedRepositories), findings,
       validity: Object.fromEntries(counts.map(item => [item._id, item.count])),

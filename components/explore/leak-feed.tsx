@@ -205,6 +205,7 @@ FeedEmptyState.displayName = "FeedEmptyState";
 type VerificationData = {
   enabled: boolean;
   total: number;
+  keyReview: { active: boolean; processed: number; completedAt: string | null; error: string | null };
   coverage: Array<{ repository: string; installed: boolean; branchesSeen: number; filesSeen: number; skippedBlobs: number; skippedLarge: number; skippedBinary: number; truncatedTrees: number; commitsSeen: number; missingPatches: number; historyCompleteAt?: string; historyError?: string; alertsPermission: string; snapshotCompleteAt?: string; error?: string }>;
   findings: Array<{ repository: string; provider: string; path: string; branch?: string; encoded: boolean; source: string; state: string; validity: string; url: string; observedAt: string }>;
 };
@@ -221,12 +222,35 @@ type VerificationStatus = {
   validity: Record<string, number>;
   lastScannedAt: string | null;
   coverage: null | { branchesSeen: number; commitsSeen: number; snapshotComplete: number; historyComplete: number; missingPatches: number; skippedLarge: number; skippedBinary: number; skippedBlobs: number; alertsDenied: number };
+  keyQueue: { enabled: boolean; backfillComplete: boolean; completedAt: string | null; error: string | null; total: number; byProvider: Record<string, number>; attributionRequired: number; scopeRequired: number; sourceInspected: number; sourceHints: Record<string, number> };
 };
 
 const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => void; isAuthenticated: boolean }) => {
   const [data, setData] = useState<VerificationData | null>(null);
   const [status, setStatus] = useState<VerificationStatus | null>(null);
   const [message, setMessage] = useState('Loading verification status…');
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewMessage, setReviewMessage] = useState('');
+
+  const toggleReview = async () => {
+    if (!data || reviewBusy) return;
+    setReviewBusy(true);
+    setReviewMessage('');
+    try {
+      const response = await fetch('/api/verification/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !data.keyReview.active })
+      });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || 'Review control unavailable.');
+      setData(current => current ? { ...current, keyReview: value.keyReview } : current);
+    } catch (error) {
+      setReviewMessage(error instanceof Error ? error.message : 'Review control unavailable.');
+    } finally {
+      setReviewBusy(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -323,6 +347,44 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
               <span>{(coverage?.branchesSeen || 0).toLocaleString()} branch heads</span>
               <span>{(coverage?.commitsSeen || 0).toLocaleString()} commits visited</span>
             </div>
+          </section>
+
+          <section className="rounded-lg border border-white/[0.07] bg-background/25 px-4 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 font-medium text-foreground/90"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Stored key review queue</div>
+                <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Grouped by detected pattern. A match or repository hint does not establish the key's actual provider or validity.</p>
+              </div>
+              <span className="font-mono text-lg font-semibold tabular-nums text-foreground">{status.keyQueue.total.toLocaleString()}</span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2 text-[10px]">
+              <span className="rounded-md border border-amber-500/15 bg-amber-500/[0.05] px-2.5 py-1 text-amber-400">{status.keyQueue.attributionRequired.toLocaleString()} OpenAI-compatible · attribution needed</span>
+              <span className="rounded-md border border-white/[0.08] bg-white/[0.025] px-2.5 py-1 text-muted-foreground">{status.keyQueue.scopeRequired.toLocaleString()} scope review needed</span>
+              <span className="rounded-md border border-white/[0.08] bg-white/[0.025] px-2.5 py-1 text-muted-foreground">{status.keyQueue.sourceInspected.toLocaleString()} current files inspected</span>
+              {!status.keyQueue.backfillComplete && <span className="px-2.5 py-1 text-muted-foreground">Queue backfill in progress</span>}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+              {Object.entries(status.keyQueue.byProvider).sort((a, b) => b[1] - a[1]).map(([provider, count]) =>
+                <span key={provider}>{provider} <strong className="font-medium tabular-nums text-foreground/80">{count.toLocaleString()}</strong></span>)}
+            </div>
+            {Object.keys(status.keyQueue.sourceHints).length > 0 && <div className="mt-3 border-t border-white/[0.07] pt-3 text-[10px] text-muted-foreground">
+              <span className="mr-2">Current-file URL hints</span>
+              {Object.entries(status.keyQueue.sourceHints).sort((a, b) => b[1] - a[1]).map(([provider, count]) =>
+                <span key={provider} className="mr-2 inline-block">{provider.replace('_', ' ')} <strong className="font-medium tabular-nums text-foreground/80">{count.toLocaleString()}</strong></span>)}
+            </div>}
+            {data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.07] pt-3">
+              <div className="text-[10px] text-muted-foreground">
+                <div className="font-medium text-foreground/80">Operator review</div>
+                <div className="mt-1">{data.keyReview.active ? `${data.keyReview.processed.toLocaleString()} records reviewed` : data.keyReview.completedAt ? `Last completed ${new Date(data.keyReview.completedAt).toLocaleString()}` : 'Ready for manual start'}</div>
+                <div className="mt-1">This pass reads current public files for provider URLs and refreshes review gates. It sends no provider authentication requests.</div>
+                {(reviewMessage || data.keyReview.error) && <div className="mt-1 text-amber-400">{reviewMessage || data.keyReview.error}</div>}
+              </div>
+              <button type="button" onClick={toggleReview} disabled={reviewBusy || !status.keyQueue.backfillComplete}
+                aria-pressed={data.keyReview.active}
+                className="rounded-md border border-amber-500/25 bg-amber-500/[0.08] px-3 py-1.5 text-[10px] font-semibold text-amber-400 transition-colors hover:bg-amber-500/[0.14] disabled:cursor-not-allowed disabled:opacity-40">
+                {data.keyReview.active ? 'Pause review' : 'Start review'}
+              </button>
+            </div>}
           </section>
 
           <div className="flex flex-wrap items-center gap-2">

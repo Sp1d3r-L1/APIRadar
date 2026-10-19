@@ -169,9 +169,9 @@ export class GitHubEventsListener {
 
     const events: GitHubEvent[] = res.data || [];
     const pushEvents = events.filter(e => e.type === 'PushEvent');
-    await recordPublicRepositories(pushEvents.map(event => event.repo.name), 'events');
 
     let enqueued = 0;
+    const enqueuedRepositories: string[] = [];
     for (const event of pushEvents) {
       if (!event.payload.head) continue;
       if (isBotActor(event.actor?.login)) continue;
@@ -188,9 +188,11 @@ export class GitHubEventsListener {
       }
       const url = `https://api.github.com/repos/${event.repo.name}/commits/${sha}`;
       this.queue.push({ sha, repo: event.repo.name, url });
+      enqueuedRepositories.push(event.repo.name);
       enqueued++;
     }
 
+    await recordPublicRepositories(enqueuedRepositories, 'events');
     if (events.length > 0) this.lastEventId = events[0]!.id;
     logger.events(`Poll: ${pushEvents.length} PushEvents, Enqueued: ${enqueued}, Queue: ${this.queue.length}`);
   }

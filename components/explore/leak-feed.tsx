@@ -1,23 +1,17 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 import {
-  CircleCheck,
   ShieldAlert,
   Clock,
   Sparkles,
   FolderGit2,
   FileCode2,
   Lock,
-  Chrome,
-  Copy,
-  Check,
-  Loader2,
   Mail,
 } from "lucide-react";
-import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LeakedKey, Provider } from "@/types";
@@ -204,103 +198,80 @@ const FeedEmptyState = React.memo(
 );
 FeedEmptyState.displayName = "FeedEmptyState";
 
-// --- Working Keys Coming Soon State ---
-const WorkingKeysComingSoon = React.memo(
-  ({ onSignIn }: { onSignIn?: () => void }) => (
-    <div className="flex flex-col items-center justify-center h-full px-4 animate-fade-in-up">
-      <div className="space-y-5 max-w-sm mx-auto text-center">
-        <div className="mx-auto w-12 h-12 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center">
-          <Lock className="h-5 w-5 text-amber-500" />
-        </div>
+type VerificationData = {
+  enabled: boolean;
+  total: number;
+  coverage: Array<{ repository: string; branchesSeen: number; filesSeen: number; skippedBlobs: number; truncatedTrees: number; alertsPermission: string; snapshotCompleteAt?: string; error?: string }>;
+  findings: Array<{ repository: string; provider: string; path: string; branch?: string; encoded: boolean; source: string; state: string; validity: string; url: string; observedAt: string }>;
+};
 
-        <div className="space-y-2">
-          <h3 className="text-lg sm:text-xl font-bold tracking-tight text-foreground">
-            Live Verification
-          </h3>
-          <div className="flex items-center justify-center gap-2">
+const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => void; isAuthenticated: boolean }) => {
+  const [data, setData] = useState<VerificationData | null>(null);
+  const [message, setMessage] = useState('Loading verification status…');
 
-            <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-[0.15em] text-amber-500/80 font-mono">
-              Coming Soon
-            </span>
-          </div>
-        </div>
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    fetch('/api/verification', { cache: 'no-store' })
+      .then(async response => {
+        if (!response.ok) throw new Error(response.status === 403 ? 'Operator access required.' : 'Verification service unavailable.');
+        return response.json() as Promise<VerificationData>;
+      })
+      .then(value => { if (!cancelled) setData(value); })
+      .catch(error => { if (!cancelled) setMessage(error.message); });
+    return () => { cancelled = true; };
+  }, [isAuthenticated]);
 
-        <p className="text-xs sm:text-sm text-muted-foreground/80 leading-relaxed">
-          APIRadar will soon verify which exposed keys are still active and
-          exploitable. Get notified the moment this feature goes live.
-        </p>
-
-        {onSignIn && (
-          <button
-            onClick={onSignIn}
-            className="group flex w-full cursor-pointer items-center justify-center gap-2 rounded-md px-4 py-2.5 text-xs sm:text-sm font-medium text-foreground bg-background border border-border transition-all duration-200 ease-in-out sm:hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            aria-label="Sign in to get notified"
-          >
-            <Chrome className="h-4 w-4" />
-            <span>Sign in to get notified</span>
-          </button>
-        )}
-      </div>
+  if (!isAuthenticated) return (
+    <div className="m-auto text-center space-y-3 p-6">
+      <Lock className="h-6 w-6 mx-auto text-amber-500" />
+      <p className="text-sm">Sign in to view verification for repositories connected to your GitHub App.</p>
+      {onSignIn && <button className="text-amber-500 underline" onClick={onSignIn}>Sign in</button>}
     </div>
-  )
-);
-WorkingKeysComingSoon.displayName = "WorkingKeysComingSoon";
-
-const fullKeyCache = new Map<string, string>();
+  );
+  if (!data) return <div className="m-auto text-sm text-muted-foreground p-6">{message}</div>;
+  return (
+    <div className="overflow-y-auto p-4 sm:p-6 space-y-4 text-xs sm:text-sm">
+      <div className="flex flex-wrap gap-3 items-center">
+        <strong>Live Verification</strong>
+        <span>{data.enabled ? 'Installation sync enabled' : 'Installation sync disabled'}</span>
+        <span>{data.coverage.length} repositories · {data.total} findings</span>
+      </div>
+      <p className="text-muted-foreground">GitHub reports active, inactive, or unknown for supported alert types. Branch snapshot matches remain unknown. No credential is shown or tested by APIRadar.</p>
+      {data.coverage.map(repo => (
+        <div key={repo.repository} className="border border-border/50 rounded p-2">
+          <strong>{repo.repository}</strong> · {repo.branchesSeen} branches · {repo.filesSeen} files · alerts: {repo.alertsPermission}
+          {repo.truncatedTrees > 0 && <span> · {repo.truncatedTrees} truncated trees</span>}
+          {repo.skippedBlobs > 0 && <span> · {repo.skippedBlobs} skipped blobs</span>}
+          {repo.snapshotCompleteAt ? <span> · last complete pass {new Date(repo.snapshotCompleteAt).toLocaleString()}</span> : <span> · snapshot in progress</span>}
+          {repo.error && <span className="text-amber-500"> · scan error</span>}
+        </div>
+      ))}
+      {data.findings.map((finding, index) => (
+        <div key={`${finding.repository}:${index}`} className="border-b border-border/30 pb-2 flex flex-wrap gap-x-2">
+          <span className="font-semibold">{finding.provider}</span>
+          <span>{finding.validity}</span>
+          <span>{finding.repository}{finding.path ? ` / ${finding.path}` : ''}</span>
+          {finding.branch && <span>branch: {finding.branch}</span>}
+          {finding.encoded && <span>Base64</span>}
+          <span>{finding.source === 'github-secret-scanning' ? 'GitHub alert' : 'branch snapshot'}</span>
+          {finding.url && <a href={finding.url} target="_blank" rel="noopener noreferrer" className="text-amber-500 underline">View location</a>}
+        </div>
+      ))}
+      {data.findings.length === 0 && <p className="text-muted-foreground">No findings synced yet. Check the repository coverage and alert permission above.</p>}
+    </div>
+  );
+};
 
 // --- Single Feed Item ---
 const FeedItem = React.memo(
   ({
     leak,
     index,
-    onSignIn,
-    isAuthenticated,
   }: {
     leak: LeakedKey;
     index: number;
-    onSignIn?: () => void;
-    isAuthenticated: boolean;
   }) => {
-    const [copyState, setCopyState] = useState<"idle" | "copying" | "success">("idle");
-
-    const handleCopyKey = async (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (copyState !== "idle") return;
-
-      if (fullKeyCache.has(leak.id)) {
-        await navigator.clipboard.writeText(fullKeyCache.get(leak.id)!);
-        setCopyState("success");
-        toast.success("Credential details successfully copied to clipboard.");
-        setTimeout(() => setCopyState("idle"), 2000);
-        return;
-      }
-
-      setCopyState("copying");
-      try {
-        const res = await fetch(`/api/leaks/${leak.id}/fullkey`);
-        
-        if (res.status === 429) {
-          setCopyState("idle");
-          toast.error("Rate limit exceeded. Please try again after a minute.");
-          return;
-        }
-
-        if (!res.ok) throw new Error("Unauthorized or restricted");
-        
-        const data = await res.json();
-        fullKeyCache.set(leak.id, data.fullKey);
-        await navigator.clipboard.writeText(data.fullKey);
-        
-        setCopyState("success");
-        toast.success("Credential details successfully copied to clipboard.");
-        
-        setTimeout(() => setCopyState("idle"), 2000);
-      } catch (err) {
-        setCopyState("idle");
-        toast.error("Failed to recover full secret key");
-      }
-    };
-
     return (
       <div 
         className={cn(
@@ -322,28 +293,8 @@ const FeedItem = React.memo(
                 <span className="hidden sm:inline">{leak.redactedKey}</span>
               </code>
 
-              {/* Mobile-only status tools + Copy Button */}
+              {/* Mobile status tools */}
               <div className="flex sm:hidden items-center justify-end gap-1.5 flex-shrink-0 min-w-[125px]">
-                <div className="w-5 flex items-center justify-center shrink-0">
-                  {isAuthenticated && (
-                    <button
-                      onClick={handleCopyKey}
-                      disabled={copyState !== "idle"}
-                      className={cn(
-                        "flex items-center justify-center h-5 w-5 rounded-md border border-amber-500/30 bg-amber-500/5 text-amber-500 transition-all duration-200",
-                        copyState === "success" && "text-emerald-500 border-emerald-500/30 bg-emerald-500/5"
-                      )}
-                    >
-                      {copyState === "copying" ? (
-                        <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                      ) : copyState === "success" ? (
-                        <Check className="h-2.5 w-2.5" />
-                      ) : (
-                        <Copy className="h-2.5 w-2.5" />
-                      )}
-                    </button>
-                  )}
-                </div>
                 <div className="flex items-center justify-center gap-1 px-1 py-0 rounded-md text-[8px] uppercase font-bold tracking-wider w-[68px] shrink-0 border bg-red-500/10 text-red-500 border-red-500/20">
                   <ShieldAlert className="h-3 w-3 shrink-0" />
                   <span>IDENTIFIED</span>
@@ -395,25 +346,6 @@ const FeedItem = React.memo(
 
           {/* Desktop-only status tools */}
           <div className="hidden sm:flex items-center gap-4 flex-shrink-0 sm:ml-auto">
-            {isAuthenticated && (
-              <button
-                onClick={handleCopyKey}
-                disabled={copyState !== "idle"}
-                className={cn(
-                  "hidden sm:flex items-center justify-center h-6 w-6 rounded-md border border-amber-500/30 bg-amber-500/5 text-amber-500 transition-all duration-200 hover:ring-[0.75px] hover:ring-amber-500/40",
-                  copyState === "success" && "text-emerald-500 border-emerald-500/30 bg-emerald-500/5 hover:ring-0"
-                )}
-                title="Copy Full Key"
-              >
-                {copyState === "copying" ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : copyState === "success" ? (
-                  <Check className="h-3 w-3" />
-                ) : (
-                  <Copy className="h-3.5 w-3.5" />
-                )}
-              </button>
-            )}
             <div className="w-[95px] items-center justify-center gap-1.5 flex px-2 py-0 rounded-md text-[10px] uppercase font-bold tracking-widest flex-shrink-0 border bg-red-500/10 text-red-500 border-red-500/20">
               <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
               <span>Identified</span>
@@ -482,21 +414,18 @@ const LeakFeedComponent = React.memo(
               </span>
             </button>
             <button
-              disabled
+              onClick={() => setActiveTab("working")}
               className={cn(
-                "relative flex items-center justify-center py-1 px-2 sm:py-2 sm:px-3 text-[11px] sm:text-sm transition-all duration-200 z-10 flex-1 min-w-[fit-content] rounded-md font-medium h-full cursor-not-allowed opacity-80",
+                "relative flex items-center justify-center py-1 px-2 sm:py-2 sm:px-3 text-[11px] sm:text-sm transition-all duration-200 z-10 flex-1 min-w-[fit-content] rounded-md font-medium h-full",
                 activeTab === "working"
                   ? "text-foreground font-semibold bg-background border border-border/50"
                   : "text-muted-foreground"
               )}
             >
-              <span className="relative z-10 truncate px-1 flex items-center justify-center gap-1 sm:gap-1.5 grayscale opacity-70">
+              <span className="relative z-10 truncate px-1 flex items-center justify-center gap-1 sm:gap-1.5">
                 <Sparkles className="h-3 w-3 sm:h-3.5 sm:w-3.5" />
                 <span className="hidden sm:inline text-nowrap">Live Verification</span>
                 <span className="sm:hidden">Verification</span>
-                <span className="text-[7.5px] sm:text-[9px] font-bold uppercase tracking-wider text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded px-1 sm:px-1.5 py-0.5 ml-0.5 sm:ml-1 leading-none">
-                  Soon
-                </span>
               </span>
             </button>
           </div>
@@ -505,7 +434,7 @@ const LeakFeedComponent = React.memo(
         {/* Feed content */}
         {activeTab === "working" ? (
           <Card className="border-border/50 bg-card/40 backdrop-blur-sm overflow-hidden flex flex-col h-[380px] sm:h-[450px]">
-             <WorkingKeysComingSoon onSignIn={onSignIn} />
+             <VerificationPanel onSignIn={onSignIn} isAuthenticated={!isUnauthenticated} />
           </Card>
         ) : (
           <Card 
@@ -530,8 +459,6 @@ const LeakFeedComponent = React.memo(
                       key={leak.id || `feed-${index}`}
                       leak={leak}
                       index={index}
-                      onSignIn={onSignIn}
-                      isAuthenticated={!isUnauthenticated}
                     />
                   ))}
                 </div>
@@ -552,7 +479,7 @@ const LeakFeedComponent = React.memo(
                         {/* Content Section */}
                         <div className="flex flex-col flex-1 min-w-0 justify-center">
                           <p className="text-[10px] sm:text-[13px] text-foreground/80 font-medium leading-[1.3] sm:line-clamp-none">
-                            <span className="font-bold text-foreground/90">[LOCKED]</span> Sign in with Google to copy API keys, view repositories, file paths, and more for all {total.toLocaleString()} {providerDisplayName} secrets.
+                            <span className="font-bold text-foreground/90">[LOCKED]</span> Sign in with Google to view repositories, file paths, and more for all {total.toLocaleString()} {providerDisplayName} secrets.
                           </p>
                         </div>
 

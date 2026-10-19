@@ -211,6 +211,7 @@ type VerificationData = {
 type VerificationStatus = {
   enabled: boolean;
   scope: string;
+  ratePausedUntil: string | null;
   repositories: number;
   discoveredRepositories: number;
   visitedRepositories: number;
@@ -282,9 +283,9 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
               Branch snapshots and commit history across repositories found by public search and push activity.
             </p>
           </div>
-          <span className={cn("inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] font-semibold", status?.enabled ? "border-emerald-500/20 bg-emerald-500/[0.07] text-emerald-400" : "border-border/70 bg-background/40 text-muted-foreground")}>
-            <span className={cn("h-1.5 w-1.5 rounded-full", status?.enabled ? "bg-emerald-400" : "bg-muted-foreground")} />
-            {status ? (status.enabled ? "Backfill enabled" : "Backfill paused") : "Connecting"}
+          <span className={cn("inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] font-semibold", status?.ratePausedUntil ? "border-amber-500/20 bg-amber-500/[0.07] text-amber-400" : status?.enabled ? "border-emerald-500/20 bg-emerald-500/[0.07] text-emerald-400" : "border-border/70 bg-background/40 text-muted-foreground")}>
+            <span className={cn("h-1.5 w-1.5 rounded-full", status?.ratePausedUntil ? "bg-amber-400" : status?.enabled ? "bg-emerald-400" : "bg-muted-foreground")} />
+            {status ? (status.ratePausedUntil ? "Rate paused" : status.enabled ? "Backfill enabled" : "Backfill disabled") : "Connecting"}
           </span>
         </div>
       </div>
@@ -317,6 +318,7 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
               <span>{status.queuedRepositories.toLocaleString()} waiting</span>
+              {status.ratePausedUntil && <span className="text-amber-400">Resumes {new Date(status.ratePausedUntil).toLocaleTimeString()}</span>}
               <span>{status.installedRepositories.toLocaleString()} App installed</span>
               <span>{(coverage?.branchesSeen || 0).toLocaleString()} branch heads</span>
               <span>{(coverage?.commitsSeen || 0).toLocaleString()} commits visited</span>

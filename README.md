@@ -114,6 +114,9 @@ GITHUB_APP_ID=your_github_app_id
 GITHUB_APP_CLIENT_ID=your_github_app_client_id
 GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
 # GITHUB_APP_PRIVATE_KEY_PATH=keys/github-app.private-key.pem
+GITHUB_APP_INSTALLATION_ID=your_primary_installation_id
+# Comma-separated installation IDs from other accounts using this same App.
+# GITHUB_COVERAGE_INSTALLATION_IDS=second_installation_id,third_installation_id
 INSTALLATION_COVERAGE_ENABLED=true
 VERIFICATION_OPERATOR_EMAILS=you@example.com
 ```
@@ -135,9 +138,14 @@ The existing global code search still covers GitHub's indexed default branches a
 the public event listener watches recent pushes. The backfill now traverses branch
 heads and reachable commit history of every public repository those feeds discover.
 The App installation additionally supplies GitHub's secret scanning alerts for
-installed public repositories. A worker selects the oldest unvisited repository
-every 30 seconds, scans up to 20 text blobs and two commits per pass, and reserves
-1,500 GitHub core API requests for the incremental feeds. It resumes from saved
+installed public repositories. A worker selects one oldest unvisited repository
+per configured installation every 30 seconds, scans up to 20 text blobs and two
+commits per pass, and reserves 1,500 GitHub core API requests on the primary
+installation for incremental feeds. Additional installations keep a 100-request
+reserve each. Work is bounded to one repository per installation per pass and
+backs off on core and secondary rate limits. Only the primary installation
+enumerates installed repositories and reads secret scanning alerts; the others
+process the existing public queue. It resumes from saved
 cursors and walks truncated Git
 trees one subtree at a time. Files over 1 MiB, binary files, and commit files
 without a complete patch are reported as coverage gaps.

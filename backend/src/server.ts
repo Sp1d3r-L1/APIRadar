@@ -9,6 +9,7 @@ import { ConfigurationService } from './services/ConfigurationService';
 import { startBackupScheduler, stopBackupScheduler } from './services/backupScheduler';
 import { registerRoutes } from './routes';
 import { fatalErrorRecoveryManager } from './utils/fatalErrorRecovery';
+import { installationCoverageService } from './services/InstallationCoverageService';
 
 // 1. Top-level Error Handling (Fail Fast & log)
 process.on('unhandledRejection', (reason) => {
@@ -36,6 +37,7 @@ async function gracefulShutdown(signal: string) {
     stopBackupScheduler();
     gitHubCodeLeakFarmService.stop();
     gitHubEventsListener.stop();
+    installationCoverageService.stop();
 
     if (activeServer) {
       await activeServer.close();
@@ -95,6 +97,7 @@ async function bootstrap() {
   try {
     await gitHubCodeLeakFarmService.start();
     await gitHubEventsListener.start();
+    installationCoverageService.start();
     await startBackupScheduler();
   } catch (serviceError) {
     throw new Error(`Failed to start services: ${serviceError instanceof Error ? serviceError.message : String(serviceError)}`);

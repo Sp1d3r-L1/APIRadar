@@ -205,7 +205,7 @@ FeedEmptyState.displayName = "FeedEmptyState";
 type VerificationData = {
   enabled: boolean;
   total: number;
-  keyReview: { active: boolean; processed: number; completedAt: string | null; error: string | null };
+  keyReview: { active: boolean; processed: number; retried: number; completedAt: string | null; error: string | null };
   coverage: Array<{ repository: string; installed: boolean; branchesSeen: number; filesSeen: number; skippedBlobs: number; skippedLarge: number; skippedBinary: number; truncatedTrees: number; commitsSeen: number; missingPatches: number; historyCompleteAt?: string; historyError?: string; alertsPermission: string; snapshotCompleteAt?: string; error?: string }>;
   findings: Array<{ repository: string; provider: string; path: string; branch?: string; encoded: boolean; source: string; state: string; validity: string; url: string; observedAt: string }>;
 };
@@ -222,7 +222,7 @@ type VerificationStatus = {
   validity: Record<string, number>;
   lastScannedAt: string | null;
   coverage: null | { branchesSeen: number; commitsSeen: number; snapshotComplete: number; historyComplete: number; missingPatches: number; skippedLarge: number; skippedBinary: number; skippedBlobs: number; alertsDenied: number };
-  keyQueue: { enabled: boolean; backfillComplete: boolean; completedAt: string | null; error: string | null; total: number; byProvider: Record<string, number>; attributionRequired: number; scopeRequired: number; sourceInspected: number; sourceHints: Record<string, number> };
+  keyQueue: { enabled: boolean; backfillComplete: boolean; completedAt: string | null; error: string | null; total: number; byProvider: Record<string, number>; attributionRequired: number; scopeRequired: number; sourceInspected: number; sourceHints: Record<string, number>; review: { byStatus: Record<string, number>; failureTags: Record<string, number>; nextRetryAt: string | null } };
 };
 
 const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => void; isAuthenticated: boolean }) => {
@@ -361,8 +361,15 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
               <span className="rounded-md border border-amber-500/15 bg-amber-500/[0.05] px-2.5 py-1 text-amber-400">{status.keyQueue.attributionRequired.toLocaleString()} OpenAI-compatible · attribution needed</span>
               <span className="rounded-md border border-white/[0.08] bg-white/[0.025] px-2.5 py-1 text-muted-foreground">{status.keyQueue.scopeRequired.toLocaleString()} scope review needed</span>
               <span className="rounded-md border border-white/[0.08] bg-white/[0.025] px-2.5 py-1 text-muted-foreground">{status.keyQueue.sourceInspected.toLocaleString()} current files inspected</span>
+              <span className="rounded-md border border-emerald-500/15 bg-emerald-500/[0.05] px-2.5 py-1 text-emerald-300/90">{(status.keyQueue.review?.byStatus.reviewed || 0).toLocaleString()} metadata reviewed</span>
+              <span className="rounded-md border border-amber-500/15 bg-amber-500/[0.05] px-2.5 py-1 text-amber-400">{(status.keyQueue.review?.byStatus.retry_queued || 0).toLocaleString()} retry queued</span>
               {!status.keyQueue.backfillComplete && <span className="px-2.5 py-1 text-muted-foreground">Queue backfill in progress</span>}
             </div>
+            {Object.keys(status.keyQueue.review?.failureTags || {}).length > 0 && <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-amber-400/80">
+              {Object.entries(status.keyQueue.review.failureTags).sort((a, b) => b[1] - a[1]).map(([tag, count]) =>
+                <span key={tag}>{tag.replaceAll('_', ' ')} <strong className="font-medium tabular-nums">{count.toLocaleString()}</strong></span>)}
+              {status.keyQueue.review.nextRetryAt && <span className="text-muted-foreground">Next retry {new Date(status.keyQueue.review.nextRetryAt).toLocaleString()}</span>}
+            </div>}
             <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
               {Object.entries(status.keyQueue.byProvider).sort((a, b) => b[1] - a[1]).map(([provider, count]) =>
                 <span key={provider}>{provider} <strong className="font-medium tabular-nums text-foreground/80">{count.toLocaleString()}</strong></span>)}
@@ -375,8 +382,8 @@ const VerificationPanel = ({ onSignIn, isAuthenticated }: { onSignIn?: () => voi
             {data && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.07] pt-3">
               <div className="text-[10px] text-muted-foreground">
                 <div className="font-medium text-foreground/80">Operator review</div>
-                <div className="mt-1">{data.keyReview.active ? `${data.keyReview.processed.toLocaleString()} records reviewed` : data.keyReview.completedAt ? `Last completed ${new Date(data.keyReview.completedAt).toLocaleString()}` : 'Ready for manual start'}</div>
-                <div className="mt-1">This pass reads current public files for provider URLs and refreshes review gates. It sends no provider authentication requests.</div>
+                <div className="mt-1">{data.keyReview.active ? `${data.keyReview.processed.toLocaleString()} attempts processed · ${data.keyReview.retried.toLocaleString()} retry queued` : data.keyReview.completedAt ? `Last idle ${new Date(data.keyReview.completedAt).toLocaleString()}` : 'Ready for manual start'}</div>
+                <div className="mt-1">This pass reads current public files for provider URLs. Failed reads are tagged and retried with backoff. It sends no provider authentication requests.</div>
                 {(reviewMessage || data.keyReview.error) && <div className="mt-1 text-amber-400">{reviewMessage || data.keyReview.error}</div>}
               </div>
               <button type="button" onClick={toggleReview} disabled={reviewBusy || !status.keyQueue.backfillComplete}

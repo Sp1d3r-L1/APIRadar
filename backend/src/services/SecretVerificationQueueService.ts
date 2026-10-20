@@ -216,10 +216,12 @@ class SecretVerificationQueueService {
 
   private async reviewQueue(): Promise<void> {
     while (this.reviewActive) {
-      const due = await SecretVerificationJob.find({
-        reviewStatus: { $in: ['pending', 'retry_queued'] },
-        $or: [{ reviewRetryAt: null }, { reviewRetryAt: { $lte: new Date() } }]
+      const retryDue = await SecretVerificationJob.find({
+        reviewStatus: 'retry_queued', reviewRetryAt: { $lte: new Date() }
       }).sort({ reviewRetryAt: 1, _id: 1 }).limit(100)
+        .select('_id secretId detectedProvider reviewAttempts').lean() as unknown as ReviewRow[];
+      const due = retryDue.length ? retryDue : await SecretVerificationJob.find({ reviewStatus: 'pending' })
+        .sort({ _id: 1 }).limit(100)
         .select('_id secretId detectedProvider reviewAttempts').lean() as unknown as ReviewRow[];
       if (!due.length) {
         this.reviewCompletedAt ||= new Date();

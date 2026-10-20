@@ -152,6 +152,24 @@ Failed source reads retain a reason tag (`rate_limited`, `timeout`,
 bounded exponential retry time while operator review remains active. Review
 progress, retry counts, and failure tags are shown in Live Verification.
 
+After reviewing source-file clues and establishing which provider owns a key,
+an operator can check a key they control with the standalone script below.
+It accepts only a key explicitly supplied in `OWNED_PROVIDER_KEY`, sends one
+read-only request to a fixed official endpoint, and prints only a status. It
+does not read the APIRadar database or verification queue. Generic `sk-`
+matches and files containing several provider URLs need attribution before a
+provider is selected; source hints alone do not prove a key's provider.
+
+```bash
+OWNED_PROVIDER_KEY='your-own-key' node tools/verify-owned-provider-key.mjs openai
+# Also supported: deepseek, openrouter
+```
+
+The endpoints are OpenAI `GET /v1/models`, DeepSeek `GET /models`, and
+OpenRouter `GET /api/v1/key`. A successful authentication response does not
+establish access to a particular paid model. The script treats access errors,
+rate limits, and transport errors separately from a successful response.
+
 The existing global code search still covers GitHub's indexed default branches and
 the public event listener watches recent pushes. The backfill now traverses branch
 heads and reachable commit history of every public repository those feeds discover.

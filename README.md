@@ -147,6 +147,10 @@ clues and records only provider hints, inspection status, and timestamps; it
 does not store file contents or send authentication requests using discovered
 keys. A file may have changed since detection, and multiple provider URLs in
 one file remain ambiguous. Queue and source hints do not establish validity.
+Failed source reads retain a reason tag (`rate_limited`, `timeout`,
+`source_not_found`, and similar), return to the review queue, and receive a
+bounded exponential retry time while operator review remains active. Review
+progress, retry counts, and failure tags are shown in Live Verification.
 
 The existing global code search still covers GitHub's indexed default branches and
 the public event listener watches recent pushes. The backfill now traverses branch

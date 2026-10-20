@@ -3,10 +3,33 @@ import axios from 'axios';
 import { Leak } from '../models/Leak';
 import { Secret } from '../models/Secret';
 import { SecretVerificationJob } from '../models/SecretVerificationJob';
+import { SecretReviewControl } from '../models/SecretReviewControl';
 import { logger } from '../utils/logger';
 
 type SecretRow = { _id: mongoose.Types.ObjectId; provider: string };
 type SourceRow = { secretId: mongoose.Types.ObjectId; repoUrl: string; filePath: string };
+type ReviewRow = { _id: mongoose.Types.ObjectId; secretId: mongoose.Types.ObjectId; detectedProvider: string; reviewAttempts: number };
+type FailureTag = 'missing_source' | 'invalid_source' | 'source_not_found' | 'access_denied' | 'rate_limited' | 'timeout' | 'file_too_large' | 'network_error';
+
+const FAILURE_PRIORITY: FailureTag[] = [
+  'rate_limited', 'timeout', 'network_error', 'access_denied',
+  'file_too_large', 'source_not_found', 'invalid_source', 'missing_source'
+];
+
+function failureTag(error: unknown): FailureTag {
+  if (!axios.isAxiosError(error)) return 'network_error';
+  if (error.response?.status === 429) return 'rate_limited';
+  if (error.response?.status === 403) return 'access_denied';
+  if (error.response?.status === 404) return 'source_not_found';
+  if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') return 'timeout';
+  if (error.message.includes('maxContentLength')) return 'file_too_large';
+  return 'network_error';
+}
+
+function retryAt(attempt: number): Date {
+  const delay = Math.min(2 * 60_000 * 2 ** Math.min(Math.max(attempt - 1, 0), 8), 8 * 60 * 60_000);
+  return new Date(Date.now() + delay + Math.floor(Math.random() * 30_000));
+}
 
 const HINTS: Array<[string, RegExp]> = [
   ['deepseek', /deepseek/i],
@@ -68,13 +91,14 @@ class SecretVerificationQueueService {
   private reviewActive = false;
   private reviewInFlight = false;
   private reviewProcessed = 0;
+  private reviewRetried = 0;
   private reviewCompletedAt: Date | null = null;
   private reviewError: string | null = null;
 
   start(): void {
     if (process.env['SECRET_VERIFICATION_QUEUE_ENABLED'] !== 'true') return;
     this.enabled = true;
-    void this.backfill().catch(error => {
+    void this.initializeQueue().catch(error => {
       this.lastError = error instanceof Error ? error.message : String(error);
       logger.error(`[VERIFICATION-QUEUE] Backfill failed: ${this.lastError}`);
     });
@@ -86,32 +110,42 @@ class SecretVerificationQueueService {
   }
 
   getReviewState() {
-    return { active: this.reviewActive, processed: this.reviewProcessed, completedAt: this.reviewCompletedAt, error: this.reviewError };
+    return { active: this.reviewActive, processed: this.reviewProcessed, retried: this.reviewRetried,
+      completedAt: this.reviewCompletedAt, error: this.reviewError };
   }
 
-  setReviewActive(active: boolean): { ok: boolean; reason?: string } {
+  async setReviewActive(active: boolean): Promise<{ ok: boolean; reason?: string }> {
     if (!this.enabled || !this.completedAt) return { ok: false, reason: 'The key queue is not ready' };
     if (active && this.reviewActive) return { ok: true };
     if (active && this.reviewInFlight) return { ok: false, reason: 'Previous review is stopping' };
     if (!active) {
+      await SecretReviewControl.updateOne({ _id: 'operator' }, { $set: { active: false } }, { upsert: true });
       this.reviewActive = false;
       return { ok: true };
     }
+    await SecretReviewControl.updateOne({ _id: 'operator' }, { $set: { active: true, startedAt: new Date() } }, { upsert: true });
+    this.beginReview();
+    return { ok: true };
+  }
+
+  private beginReview(): void {
+    if (this.reviewInFlight) return;
     this.reviewActive = true;
     this.reviewInFlight = true;
     this.reviewProcessed = 0;
+    this.reviewRetried = 0;
     this.reviewCompletedAt = null;
     this.reviewError = null;
     void this.reviewQueue()
       .catch(error => {
         this.reviewError = error instanceof Error ? error.message : String(error);
         logger.error(`[VERIFICATION-QUEUE] Review failed: ${this.reviewError}`);
+        void SecretReviewControl.updateOne({ _id: 'operator' }, { $set: { active: false } });
       })
       .finally(() => {
         this.reviewActive = false;
         this.reviewInFlight = false;
       });
-    return { ok: true };
   }
 
   async enqueueSecret(secretId: mongoose.Types.ObjectId, provider: string): Promise<void> {
@@ -142,6 +176,8 @@ class SecretVerificationQueueService {
           status: 'queued',
           gate: openAICompatible ? 'provider_attribution_required' : 'scope_required',
           result: 'not_checked',
+          reviewStatus: 'pending',
+          reviewAttempts: 0,
           sourceStatus: 'pending',
           sourceHints: []
         }, $set: {
@@ -153,8 +189,14 @@ class SecretVerificationQueueService {
     }), { ordered: false });
   }
 
-  private async backfill(): Promise<void> {
+  private async initializeQueue(): Promise<void> {
     await SecretVerificationJob.init();
+    await SecretVerificationJob.updateMany({ reviewStatus: { $exists: false } }, { $set: {
+      reviewStatus: 'pending', reviewAttempts: 0, reviewFailureTag: null, reviewRetryAt: null
+    } });
+    await SecretVerificationJob.updateMany({ reviewStatus: 'reviewing' }, { $set: {
+      reviewStatus: 'retry_queued', reviewFailureTag: 'interrupted', reviewRetryAt: new Date()
+    } });
     let lastId: mongoose.Types.ObjectId | undefined;
     let processed = 0;
     while (true) {
@@ -168,39 +210,72 @@ class SecretVerificationQueueService {
     }
     this.completedAt = new Date();
     logger.init(`[VERIFICATION-QUEUE] Classified ${processed} stored keys without sending provider requests`);
+    const control = await SecretReviewControl.findById('operator').lean();
+    if (control?.active) this.beginReview();
   }
 
   private async reviewQueue(): Promise<void> {
-    let lastId: mongoose.Types.ObjectId | undefined;
     while (this.reviewActive) {
-      const filter = lastId ? { _id: { $gt: lastId } } : {};
-      const secrets = await Secret.find(filter).sort({ _id: 1 }).limit(250)
-        .select('_id provider').lean() as unknown as SecretRow[];
-      if (!secrets.length) break;
-      await this.enqueueBatch(secrets);
-      const reviewed: mongoose.Types.ObjectId[] = [];
-      for (const secret of secrets) {
+      const due = await SecretVerificationJob.find({
+        reviewStatus: { $in: ['pending', 'retry_queued'] },
+        $or: [{ reviewRetryAt: null }, { reviewRetryAt: { $lte: new Date() } }]
+      }).sort({ reviewRetryAt: 1, _id: 1 }).limit(100)
+        .select('_id secretId detectedProvider reviewAttempts').lean() as unknown as ReviewRow[];
+      if (!due.length) {
+        this.reviewCompletedAt ||= new Date();
+        await new Promise(resolve => setTimeout(resolve, 15_000));
+        continue;
+      }
+      this.reviewCompletedAt = null;
+
+      const knownProviderIds = due.filter(job => job.detectedProvider !== 'openai').map(job => job._id);
+      if (knownProviderIds.length) {
+        await SecretVerificationJob.updateMany({ _id: { $in: knownProviderIds } }, { $set: {
+          reviewStatus: 'reviewed', reviewFailureTag: null, reviewRetryAt: null,
+          sourceStatus: 'skipped', reviewedAt: new Date()
+        }, $inc: { reviewAttempts: 1 } });
+        this.reviewProcessed += knownProviderIds.length;
+      }
+
+      for (const job of due) {
         if (!this.reviewActive) break;
-        if (secret.provider === 'openai') await this.inspectSources(secret._id);
-        reviewed.push(secret._id);
+        if (job.detectedProvider !== 'openai') continue;
+        const attempt = (job.reviewAttempts || 0) + 1;
+        await SecretVerificationJob.updateOne({ _id: job._id }, { $set: { reviewStatus: 'reviewing' }, $inc: { reviewAttempts: 1 } });
+        const result = await this.inspectSources(job.secretId).catch(() => ({
+          inspected: false as const, hints: [], failure: 'network_error' as FailureTag
+        }));
+        if (result.inspected) {
+          await SecretVerificationJob.updateOne({ _id: job._id }, { $set: {
+            sourceHints: result.hints, sourceStatus: 'inspected', sourceInspectedAt: new Date(),
+            reviewStatus: 'reviewed', reviewFailureTag: null, reviewRetryAt: null, reviewedAt: new Date()
+          } });
+        } else {
+          await SecretVerificationJob.updateOne({ _id: job._id }, { $set: {
+            sourceHints: [], sourceStatus: 'unavailable', sourceInspectedAt: new Date(),
+            reviewStatus: 'retry_queued', reviewFailureTag: result.failure,
+            reviewRetryAt: retryAt(attempt)
+          } });
+          this.reviewRetried += 1;
+        }
+        this.reviewProcessed += 1;
       }
-      if (reviewed.length) {
-        await SecretVerificationJob.updateMany({ secretId: { $in: reviewed } }, { $set: { reviewedAt: new Date() } });
-      }
-      this.reviewProcessed += reviewed.length;
-      lastId = secrets[secrets.length - 1]!._id;
     }
-    if (this.reviewActive) this.reviewCompletedAt = new Date();
-    logger.init(`[VERIFICATION-QUEUE] Metadata review finished after ${this.reviewProcessed} keys`);
+    logger.init(`[VERIFICATION-QUEUE] Metadata review paused after ${this.reviewProcessed} attempts; ${this.reviewRetried} returned to retry queue`);
   }
 
-  private async inspectSources(secretId: mongoose.Types.ObjectId): Promise<void> {
+  private async inspectSources(secretId: mongoose.Types.ObjectId): Promise<{ inspected: boolean; hints: string[]; failure?: FailureTag }> {
     const sources = await Leak.find({ secretId }).select('secretId repoUrl filePath').limit(2).lean() as unknown as SourceRow[];
     const hints = new Set<string>();
     let inspected = false;
+    const failures: FailureTag[] = [];
+    if (!sources.length) failures.push('missing_source');
     for (const source of sources) {
       const url = rawGitHubUrl(source);
-      if (!url) continue;
+      if (!url) {
+        failures.push('invalid_source');
+        continue;
+      }
       try {
         const response = await axios.get<string>(url, {
           timeout: 6000,
@@ -212,15 +287,12 @@ class SecretVerificationQueueService {
         if (typeof response.data !== 'string') continue;
         inspected = true;
         for (const hint of sourceHints(response.data)) hints.add(hint);
-      } catch {
-        // The current public file can be missing, moved, or too large.
+      } catch (error) {
+        failures.push(failureTag(error));
       }
     }
-    await SecretVerificationJob.updateOne({ secretId }, { $set: {
-      sourceHints: [...hints],
-      sourceStatus: inspected ? 'inspected' : 'unavailable',
-      sourceInspectedAt: new Date()
-    } });
+    if (inspected) return { inspected, hints: [...hints] };
+    return { inspected, hints: [], failure: FAILURE_PRIORITY.find(tag => failures.includes(tag)) || 'network_error' };
   }
 }
 

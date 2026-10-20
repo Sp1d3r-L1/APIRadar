@@ -16,7 +16,7 @@ function isOperator(request: AuthenticatedRequest): boolean {
 export async function verificationRoutes(server: FastifyInstance) {
   server.addHook('preValidation', authenticateUser);
   server.get('/verification/status', async (_request, reply) => {
-    const [repositories, discoveredRepositories, visitedRepositories, installedRepositories, findings, counts, last, coverage, keyQueue, sourceInspected, sourceHintCounts] = await Promise.all([
+    const [repositories, discoveredRepositories, visitedRepositories, installedRepositories, findings, counts, last, coverage, keyQueue, sourceInspected, sourceHintCounts, reviewCounts] = await Promise.all([
       RepositoryCoverage.countDocuments(),
       ScannedRepo.countDocuments(),
       RepositoryCoverage.countDocuments({ lastScannedAt: { $exists: true } }),
@@ -49,6 +49,10 @@ export async function verificationRoutes(server: FastifyInstance) {
       SecretVerificationJob.aggregate<{ _id: string; count: number }>([
         { $unwind: '$sourceHints' },
         { $group: { _id: '$sourceHints', count: { $sum: 1 } } }
+      ]),
+      SecretVerificationJob.aggregate<{ _id: { status: string; failure: string | null }; count: number; nextRetryAt: Date | null }>([
+        { $group: { _id: { status: '$reviewStatus', failure: '$reviewFailureTag' },
+          count: { $sum: 1 }, nextRetryAt: { $min: '$reviewRetryAt' } } }
       ])
     ]);
     return reply.send({
@@ -70,7 +74,16 @@ export async function verificationRoutes(server: FastifyInstance) {
         scopeRequired: keyQueue.filter(row => row._id.gate === 'scope_required')
           .reduce((sum, row) => sum + row.count, 0),
         sourceInspected,
-        sourceHints: Object.fromEntries(sourceHintCounts.map(row => [row._id, row.count]))
+        sourceHints: Object.fromEntries(sourceHintCounts.map(row => [row._id, row.count])),
+        review: {
+          byStatus: Object.fromEntries(['pending', 'reviewing', 'reviewed', 'retry_queued'].map(status => [status,
+            reviewCounts.filter(row => row._id.status === status).reduce((sum, row) => sum + row.count, 0)])),
+          failureTags: Object.fromEntries(reviewCounts.filter(row => row._id.status === 'retry_queued' && row._id.failure)
+            .map(row => [row._id.failure, row.count])),
+          nextRetryAt: reviewCounts.filter(row => row._id.status === 'retry_queued')
+            .map(row => row.nextRetryAt).filter((date): date is Date => Boolean(date))
+            .sort((a, b) => a.getTime() - b.getTime())[0] || null
+        }
       }
     });
   });
@@ -92,7 +105,7 @@ export async function verificationRoutes(server: FastifyInstance) {
     if (!isOperator(request)) return reply.status(403).send({ error: 'Operator access required' });
     const body = request.body as { enabled?: unknown } | undefined;
     if (typeof body?.enabled !== 'boolean') return reply.status(400).send({ error: 'enabled must be a boolean' });
-    const result = secretVerificationQueueService.setReviewActive(body.enabled);
+    const result = await secretVerificationQueueService.setReviewActive(body.enabled);
     if (!result.ok) return reply.status(409).send({ error: result.reason });
     return reply.send({ keyReview: secretVerificationQueueService.getReviewState() });
   });

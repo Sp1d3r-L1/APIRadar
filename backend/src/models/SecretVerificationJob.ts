@@ -12,6 +12,10 @@ export interface ISecretVerificationJob extends Document {
   status: 'queued' | 'completed';
   gate: 'scope_required' | 'provider_attribution_required' | 'none';
   result: 'not_checked' | 'active' | 'inactive' | 'inconclusive';
+  reviewStatus: 'pending' | 'reviewing' | 'reviewed' | 'retry_queued';
+  reviewAttempts: number;
+  reviewFailureTag?: string | null;
+  reviewRetryAt?: Date | null;
   reviewedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -29,9 +33,14 @@ const schema = new Schema<ISecretVerificationJob>({
   status: { type: String, enum: ['queued', 'completed'], default: 'queued', index: true },
   gate: { type: String, enum: ['scope_required', 'provider_attribution_required', 'none'], required: true, index: true },
   result: { type: String, enum: ['not_checked', 'active', 'inactive', 'inconclusive'], default: 'not_checked' },
+  reviewStatus: { type: String, enum: ['pending', 'reviewing', 'reviewed', 'retry_queued'], default: 'pending', index: true },
+  reviewAttempts: { type: Number, default: 0 },
+  reviewFailureTag: { type: String, default: null },
+  reviewRetryAt: { type: Date, default: null },
   reviewedAt: { type: Date, default: null }
 }, { timestamps: true, versionKey: false });
 
 schema.index({ status: 1, gate: 1, createdAt: 1 });
+schema.index({ reviewStatus: 1, reviewRetryAt: 1 });
 
 export const SecretVerificationJob = mongoose.model<ISecretVerificationJob>('SecretVerificationJob', schema);
